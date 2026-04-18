@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 class VictoryScreen extends StatelessWidget {
   final bool won;
   final bool multiplayer;
+  final bool allowClose;
   final String playerName;
   final int playerRating;
   final int ratingDelta;
@@ -17,6 +18,7 @@ class VictoryScreen extends StatelessWidget {
     super.key,
     required this.won,
     required this.multiplayer,
+    this.allowClose = false,
     required this.playerName,
     required this.playerRating,
     required this.ratingDelta,
@@ -69,10 +71,16 @@ class VictoryScreen extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  IconButton(
-                    onPressed: () => Navigator.of(context).pop('find_new'),
-                    icon: const Icon(Icons.settings),
-                  ),
+                  if (allowClose)
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop('close'),
+                      icon: const Icon(Icons.close),
+                    )
+                  else
+                    IconButton(
+                      onPressed: () => Navigator.of(context).pop('find_new'),
+                      icon: const Icon(Icons.settings),
+                    ),
                 ],
               ),
               const SizedBox(height: 14),

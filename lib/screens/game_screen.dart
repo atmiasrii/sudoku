@@ -52,6 +52,8 @@ class _GameScreenState extends State<GameScreen> {
   bool _awaitingFinish = false;
   bool _gameStateErrorShown = false;
   bool _noteMode = false;
+  bool _postMatchPracticeMode = false;
+  bool _showBackAfterMatch = false;
 
   final Map<String, Set<int>> _cellNotes = {};
 
@@ -224,7 +226,10 @@ class _GameScreenState extends State<GameScreen> {
         );
       }
 
-      await _openResultScreen(won: !_lost);
+      await _openResultScreen(
+        won: !_lost,
+        allowContinueOnClose: true,
+      );
     }));
 
     _subs.add(_socketService.ratingUpdateStream.listen((payload) {
@@ -418,6 +423,8 @@ class _GameScreenState extends State<GameScreen> {
       _awaitingFinish = false;
       _gameStateErrorShown = false;
       _noteMode = false;
+      _postMatchPracticeMode = false;
+      _showBackAfterMatch = false;
       _cellNotes.clear();
       _playerName = 'You';
       _opponentName = 'Opponent';
@@ -444,6 +451,8 @@ class _GameScreenState extends State<GameScreen> {
     _awaitingFinish = false;
     _gameStateErrorShown = false;
     _noteMode = false;
+    _postMatchPracticeMode = false;
+    _showBackAfterMatch = false;
     _cellNotes.clear();
     _playerName = 'You';
     _opponentName = 'Opponent';
@@ -535,7 +544,10 @@ class _GameScreenState extends State<GameScreen> {
     return ((_filledFillableCells / totalActions) * 100).clamp(0, 100);
   }
 
-  Future<void> _openResultScreen({required bool won}) async {
+  Future<void> _openResultScreen({
+    required bool won,
+    bool allowContinueOnClose = false,
+  }) async {
     if (!mounted) return;
 
     final previousRating = _playerRating - (won ? 20 : -10);
@@ -545,6 +557,7 @@ class _GameScreenState extends State<GameScreen> {
         builder: (_) => VictoryScreen(
           won: won,
           multiplayer: _isMultiplayer,
+          allowClose: allowContinueOnClose,
           playerName: _playerName,
           playerRating: _playerRating,
           ratingDelta: ratingDelta,
@@ -559,6 +572,42 @@ class _GameScreenState extends State<GameScreen> {
     );
 
     if (!mounted) return;
+
+    if (result == 'close' && allowContinueOnClose) {
+      final continuePlaying = await showDialog<bool>(
+        context: context,
+        builder: (context) {
+          return AlertDialog(
+            title: const Text('Result Closed'),
+            content: const Text(
+              'Do you want to keep solving this board locally, or go back?',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('Back'),
+              ),
+              ElevatedButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('Continue'),
+              ),
+            ],
+          );
+        },
+      );
+
+      if (!mounted) return;
+
+      if (continuePlaying == true) {
+        setState(() {
+          _postMatchPracticeMode = true;
+          _showBackAfterMatch = true;
+          _gameEnded = false;
+          _awaitingFinish = false;
+        });
+        return;
+      }
+    }
 
     if (result == 'rematch') {
       await _startNewGameFromModal();
@@ -600,6 +649,7 @@ class _GameScreenState extends State<GameScreen> {
   }
 
   void _reportProgress({bool completed = false}) {
+    if (_postMatchPracticeMode) return;
     if (_gameId == null) return;
 
     if (_isMultiplayer && widget.currentUserId != null) {
@@ -683,7 +733,7 @@ class _GameScreenState extends State<GameScreen> {
         _gameEnded = true;
         _lost = true;
       });
-      await _openResultScreen(won: false);
+      await _openResultScreen(won: false, allowContinueOnClose: true);
       return;
     }
 
@@ -700,7 +750,7 @@ class _GameScreenState extends State<GameScreen> {
         _gameEnded = true;
         _lost = false;
       });
-      await _openResultScreen(won: true);
+      await _openResultScreen(won: true, allowContinueOnClose: true);
     }
   }
 
@@ -778,7 +828,7 @@ class _GameScreenState extends State<GameScreen> {
         _gameEnded = true;
         _lost = false;
       });
-      await _openResultScreen(won: true);
+      await _openResultScreen(won: true, allowContinueOnClose: true);
     }
   }
 
@@ -824,13 +874,19 @@ class _GameScreenState extends State<GameScreen> {
       backgroundColor: const Color(0xFFF2F4F8),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 8, 14, 10),
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 18),
           child: Column(
             children: [
               _TopStatusRow(
                 rating: _playerRating,
                 timeText: widget.timerEnabled ? _formatTime() : '--:--',
                 onMenuTap: _showGameMenu,
+                showBackButton: _showBackAfterMatch,
+                onBackTap: () {
+                  if (Navigator.of(context).canPop()) {
+                    Navigator.of(context).pop();
+                  }
+                },
               ),
               const SizedBox(height: 12),
               _VersusHeader(
@@ -908,17 +964,29 @@ class _TopStatusRow extends StatelessWidget {
   final int rating;
   final String timeText;
   final VoidCallback onMenuTap;
+  final bool showBackButton;
+  final VoidCallback? onBackTap;
 
   const _TopStatusRow({
     required this.rating,
     required this.timeText,
     required this.onMenuTap,
+    this.showBackButton = false,
+    this.onBackTap,
   });
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: [
+        if (showBackButton)
+          IconButton(
+            onPressed: onBackTap,
+            icon: const Icon(Icons.arrow_back, color: Color(0xFF0E46A7)),
+          )
+        else
+          const SizedBox(width: 6),
+        const SizedBox(width: 6),
         const CircleAvatar(
           radius: 18,
           backgroundColor: Color(0xFFDEE5F2),
@@ -1172,17 +1240,71 @@ class _ProgressPanel extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 8),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(999),
-            child: LinearProgressIndicator(
-              minHeight: 8,
-              value: playerProgress / 100,
-              backgroundColor: const Color(0xFFD1D5DB),
-              valueColor:
-                  const AlwaysStoppedAnimation<Color>(Color(0xFF0E53BE)),
-            ),
+          _HeadToHeadProgressBar(
+            playerProgress: playerProgress,
+            opponentProgress: opponentProgress,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _HeadToHeadProgressBar extends StatelessWidget {
+  final int playerProgress;
+  final int opponentProgress;
+
+  const _HeadToHeadProgressBar({
+    required this.playerProgress,
+    required this.opponentProgress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final player = playerProgress.clamp(0, 100).toDouble();
+    final opponent = opponentProgress.clamp(0, 100).toDouble();
+    final total = (player + opponent) <= 0 ? 1.0 : (player + opponent);
+    final playerShare = player / total;
+    final opponentShare = opponent / total;
+
+    return Container(
+      height: 9,
+      decoration: BoxDecoration(
+        color: const Color(0xFFD3D9E4),
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(999),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final width = constraints.maxWidth;
+            final playerWidth = (width * playerShare).clamp(0.0, width);
+            final opponentWidth = (width * opponentShare).clamp(0.0, width);
+
+            return Stack(
+              children: [
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Container(
+                    width: playerWidth,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFF2FA8FF),
+                    ),
+                  ),
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Container(
+                    width: opponentWidth,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFFF5A5F),
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        ),
       ),
     );
   }
