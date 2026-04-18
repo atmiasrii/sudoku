@@ -326,6 +326,7 @@ async function finalizeMatch(io, gameId, sessionResult, reason) {
   }
 
   io.to(gameId).emit('game_end', {
+    gameId,
     ...sessionResult,
     reason,
     persistedMatch,

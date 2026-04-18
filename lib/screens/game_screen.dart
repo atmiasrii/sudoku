@@ -185,7 +185,7 @@ class _GameScreenState extends State<GameScreen> {
     }));
 
     _subs.add(_socketService.gameEndStream.listen((payload) async {
-      final gameId = payload['gameId']?.toString();
+      final gameId = payload['gameId']?.toString() ?? _gameId;
       if (gameId == null || gameId != _gameId || !mounted) return;
 
       final winnerId = payload['winnerId']?.toString();
