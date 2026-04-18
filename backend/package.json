@@ -1,0 +1,32 @@
+{
+  "name": "sudoku-backend",
+  "version": "1.0.0",
+  "description": "Temporary local Sudoku backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test:session": "node testGameSessionService.js",
+    "test:matchmaking": "node testMatchmakingService.js",
+    "test:elo": "node testEloService.js",
+    "test:sudoku": "node tests/sudoku.test.js",
+    "test:session:full": "node tests/session.test.js",
+    "test:matchmaking:full": "node tests/matchmaking.test.js",
+    "test:elo:full": "node tests/elo.test.js",
+    "test:websocket": "node tests/websocket.test.js",
+    "test:anticheat": "node tests/antiCheat.test.js",
+    "test:reconnect": "node tests/reconnect.test.js",
+    "test:integration": "node tests/integration.test.js",
+    "test:all": "node tests/runAllTests.js",
+    "check:logging": "node scripts/checkLoggingTables.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.99.2",
+    "cors": "^2.8.5",
+    "dotenv": "^17.3.1",
+    "express": "^4.21.2",
+    "socket.io-client": "^4.8.3",
+    "socket.io": "^4.8.3",
+    "uuid": "^11.1.0"
+  }
+}

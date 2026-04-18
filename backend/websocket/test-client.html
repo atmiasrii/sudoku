@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sudoku Socket Test Client</title>
+    <style>
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        margin: 20px;
+        line-height: 1.4;
+      }
+
+      .row {
+        margin-bottom: 10px;
+      }
+
+      input,
+      button {
+        padding: 8px;
+        margin-right: 8px;
+      }
+
+      #log {
+        border: 1px solid #ccc;
+        padding: 10px;
+        height: 320px;
+        overflow: auto;
+        white-space: pre-wrap;
+        background: #fafafa;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Sudoku Multiplayer Socket Test</h1>
+    <p>Open this file in two browser tabs with different user IDs.</p>
+
+    <div class="row">
+      <label for="userId">User ID</label>
+      <input id="userId" value="user1" />
+      <button id="connectBtn">Connect + Join Queue</button>
+    </div>
+
+    <div class="row">
+      <label for="filledCells">filledCells</label>
+      <input id="filledCells" type="number" value="10" />
+      <label for="mistakes">mistakes</label>
+      <input id="mistakes" type="number" value="0" />
+      <label for="completed">completed</label>
+      <input id="completed" type="checkbox" />
+      <button id="sendProgressBtn">Send progress_update</button>
+      <button id="reconnectBtn">Send reconnect_game</button>
+    </div>
+
+    <div class="row">
+      <label for="boardJson">Board JSON (used when completed=true)</label>
+      <input id="boardJson" style="width: 520px;" placeholder='[[...],[...],...]' />
+    </div>
+
+    <h3>Event Log</h3>
+    <div id="log"></div>
+
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+    <script>
+      let socket;
+      let activeGameId = null;
+
+      const logNode = document.getElementById('log');
+      const userIdNode = document.getElementById('userId');
+
+      function log(message, payload) {
+        const line = `[${new Date().toLocaleTimeString()}] ${message}`;
+        logNode.textContent += `${line}${payload ? `\n${JSON.stringify(payload, null, 2)}` : ''}\n\n`;
+        logNode.scrollTop = logNode.scrollHeight;
+      }
+
+      document.getElementById('connectBtn').addEventListener('click', () => {
+        const userId = userIdNode.value.trim();
+        if (!userId) {
+          log('userId is required');
+          return;
+        }
+
+        if (socket) socket.disconnect();
+
+        socket = io('http://localhost:4000');
+
+        socket.on('connect', () => {
+          log('Connected', { socketId: socket.id, userId });
+          socket.emit('join_queue', { userId });
+          log('Emitted join_queue', { userId });
+        });
+
+        socket.on('match_found', (payload) => {
+          activeGameId = payload.gameId;
+          log('Received match_found', payload);
+        });
+
+        socket.on('progress_update', (payload) => {
+          log('Received progress_update', payload);
+        });
+
+        socket.on('game_end', (payload) => {
+          log('Received game_end', payload);
+        });
+
+        socket.on('opponent_disconnected', (payload) => {
+          log('Received opponent_disconnected', payload);
+        });
+
+        socket.on('opponent_reconnected', (payload) => {
+          log('Received opponent_reconnected', payload);
+        });
+
+        socket.on('game_state', (payload) => {
+          activeGameId = payload.gameId;
+          log('Received game_state', payload);
+        });
+
+        socket.on('progress_rejected', (payload) => {
+          log('Received progress_rejected', payload);
+        });
+
+        socket.on('reconnect_required', (payload) => {
+          log('Received reconnect_required', payload);
+        });
+
+        socket.on('disconnect', () => {
+          log('Disconnected');
+        });
+      });
+
+      document.getElementById('sendProgressBtn').addEventListener('click', () => {
+        if (!socket || !socket.connected) {
+          log('Socket not connected');
+          return;
+        }
+
+        const filledCells = Number(document.getElementById('filledCells').value);
+        const mistakes = Number(document.getElementById('mistakes').value);
+        const completed = document.getElementById('completed').checked;
+        const userId = userIdNode.value.trim();
+        const boardRaw = document.getElementById('boardJson').value.trim();
+
+        let board;
+        if (completed && boardRaw) {
+          try {
+            board = JSON.parse(boardRaw);
+          } catch (error) {
+            log('Invalid board JSON');
+            return;
+          }
+        }
+
+        const payload = {
+          gameId: activeGameId,
+          userId,
+          filledCells,
+          mistakes,
+          completed,
+        };
+
+        if (board) {
+          payload.board = board;
+        }
+
+        socket.emit('progress_update', payload);
+        log('Emitted progress_update', payload);
+      });
+
+      document.getElementById('reconnectBtn').addEventListener('click', () => {
+        if (!socket || !socket.connected) {
+          log('Socket not connected');
+          return;
+        }
+
+        const userId = userIdNode.value.trim();
+        const payload = {
+          userId,
+          gameId: activeGameId,
+        };
+
+        socket.emit('reconnect_game', payload);
+        log('Emitted reconnect_game', payload);
+      });
+    </script>
+  </body>
+</html>
