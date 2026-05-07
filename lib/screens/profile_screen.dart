@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -11,6 +13,10 @@ class ProfileScreen extends StatefulWidget {
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
+  static final RegExp _uuidPattern = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+  );
+
   bool _loading = true;
   String _title = 'Analytical Sanctuary';
   String _userId = 'local_player';
@@ -33,7 +39,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     });
 
     final prefs = await SharedPreferences.getInstance();
-    final userId = prefs.getString('local_user_id') ?? 'local_player';
+    final existing = prefs.getString('local_user_id');
+    final userId = (existing != null && _uuidPattern.hasMatch(existing))
+        ? existing
+        : _generateUuidV4();
+    if (existing != userId) {
+      await prefs.setString('local_user_id', userId);
+    }
 
     final profile = await GameApiService.getUserProfile(userId);
     final history = await GameApiService.getUserMatchHistory(userId);
@@ -72,6 +84,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final mins = (seconds ~/ 60).toString().padLeft(2, '0');
     final secs = (seconds % 60).toString().padLeft(2, '0');
     return '$mins:$secs';
+  }
+
+  String _generateUuidV4() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    String toHex(int value) => value.toRadixString(16).padLeft(2, '0');
+
+    final hex = bytes.map(toHex).join();
+    return '${hex.substring(0, 8)}-'
+        '${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-'
+        '${hex.substring(16, 20)}-'
+        '${hex.substring(20, 32)}';
   }
 
   @override

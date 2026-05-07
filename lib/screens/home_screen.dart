@@ -23,6 +23,10 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  static final RegExp _uuidPattern = RegExp(
+    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
+  );
+
   final MultiplayerSocketService _socketService =
       MultiplayerSocketService.instance;
   final ValueNotifier<int> _queueSecondsNotifier = ValueNotifier<int>(0);
@@ -44,14 +48,32 @@ class _HomeScreenState extends State<HomeScreen> {
   Future<String> _getOrCreateUserId() async {
     final prefs = await SharedPreferences.getInstance();
     final existing = prefs.getString('local_user_id');
-    if (existing != null && existing.isNotEmpty) {
+    if (existing != null && _uuidPattern.hasMatch(existing)) {
       return existing;
     }
 
-    final randomPart = Random().nextInt(999999).toString().padLeft(6, '0');
-    final id = 'user_${DateTime.now().millisecondsSinceEpoch}_$randomPart';
+    final id = _generateUuidV4();
     await prefs.setString('local_user_id', id);
     return id;
+  }
+
+  String _generateUuidV4() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+
+    // RFC 4122 version 4
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    // RFC 4122 variant
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    String toHex(int value) => value.toRadixString(16).padLeft(2, '0');
+
+    final hex = bytes.map(toHex).join();
+    return '${hex.substring(0, 8)}-'
+        '${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-'
+        '${hex.substring(16, 20)}-'
+        '${hex.substring(20, 32)}';
   }
 
   String _formatQueueTime(int totalSeconds) {

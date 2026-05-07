@@ -552,22 +552,21 @@ class _GameScreenState extends State<GameScreen> {
 
     final previousRating = _playerRating - (won ? 20 : -10);
     final ratingDelta = _playerRating - previousRating;
-    final result = await Navigator.of(context).push<String>(
-      MaterialPageRoute(
-        builder: (_) => VictoryScreen(
-          won: won,
-          multiplayer: _isMultiplayer,
-          allowClose: allowContinueOnClose,
-          playerName: _playerName,
-          playerRating: _playerRating,
-          ratingDelta: ratingDelta,
-          timeText: _formatTime(),
-          accuracy: _accuracyPercent,
-          mistakes: _mistakes,
-          progress: _playerProgressPercent,
-          difficulty: _difficulty,
-          board: _board.cloneCurrent(),
-        ),
+    final result = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => VictoryScreen(
+        won: won,
+        multiplayer: _isMultiplayer,
+        allowClose: allowContinueOnClose,
+        playerName: _playerName,
+        playerRating: _playerRating,
+        ratingDelta: ratingDelta,
+        timeText: _formatTime(),
+        accuracy: _accuracyPercent,
+        mistakes: _mistakes,
+        progress: _playerProgressPercent,
+        difficulty: _difficulty,
       ),
     );
 
