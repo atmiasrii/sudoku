@@ -2,9 +2,15 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../app_colors.dart';
+import '../widgets/user_avatar.dart';
+
 import '../logic/sudoku_validator.dart';
 import '../models/game_session.dart';
+import '../models/game_snapshot.dart';
 import '../models/sudoku_board.dart';
+import '../services/active_game_store.dart';
+import '../services/analytics_service.dart';
 import '../services/game_api_service.dart';
 import '../services/multiplayer_socket_service.dart';
 import 'victory_screen.dart';
@@ -12,6 +18,7 @@ import '../widgets/sudoku_grid.dart';
 
 class GameScreen extends StatefulWidget {
   final GameSession? initialSession;
+  final GameSnapshot? restoreFrom;
   final bool highlightMistakes;
   final bool timerEnabled;
   final String? currentUserId;
@@ -20,6 +27,7 @@ class GameScreen extends StatefulWidget {
   const GameScreen({
     super.key,
     this.initialSession,
+    this.restoreFrom,
     required this.highlightMistakes,
     required this.timerEnabled,
     this.currentUserId,
@@ -30,7 +38,8 @@ class GameScreen extends StatefulWidget {
   State<GameScreen> createState() => _GameScreenState();
 }
 
-class _GameScreenState extends State<GameScreen> {
+class _GameScreenState extends State<GameScreen>
+    with WidgetsBindingObserver {
   final MultiplayerSocketService _socketService =
       MultiplayerSocketService.instance;
 
@@ -41,7 +50,6 @@ class _GameScreenState extends State<GameScreen> {
   int? _selectedRow;
   int? _selectedCol;
   final List<_Move> _moveHistory = [];
-  final Set<String> _invalidCells = {};
   final List<StreamSubscription> _subs = [];
 
   Timer? _timer;
@@ -54,6 +62,7 @@ class _GameScreenState extends State<GameScreen> {
   bool _noteMode = false;
   bool _postMatchPracticeMode = false;
   bool _showBackAfterMatch = false;
+  bool _hideRatings = false;
 
   final Map<String, Set<int>> _cellNotes = {};
 
@@ -62,6 +71,7 @@ class _GameScreenState extends State<GameScreen> {
   int _playerRating = 1200;
   int _opponentRating = 1200;
   int _opponentProgressPercent = 0;
+  int _lastRatingDelta = 0;
   int _opponentMistakes = 0;
   String? _opponentId;
 
@@ -139,14 +149,120 @@ class _GameScreenState extends State<GameScreen> {
   @override
   void initState() {
     super.initState();
-    _loadSession(widget.initialSession);
+    WidgetsBinding.instance.addObserver(this);
+    if (widget.restoreFrom != null) {
+      _restoreFromSnapshot(widget.restoreFrom!);
+    } else {
+      _loadSession(widget.initialSession);
+    }
     _startTimerIfNeeded();
     if (_isMultiplayer) {
       _bindMultiplayerEvents();
       if (widget.currentUserId != null && _gameId != null) {
-        _socketService.reconnectGame(widget.currentUserId!, _gameId!);
+        if (widget.restoreFrom != null) {
+          // Cold restore: the socket was torn down when the app closed, so
+          // reconnect it before asking the server to rejoin the match.
+          _reconnectAfterRestore();
+        } else {
+          _socketService.reconnectGame(widget.currentUserId!, _gameId!);
+        }
       }
     }
+  }
+
+  Future<void> _reconnectAfterRestore() async {
+    final userId = widget.currentUserId;
+    final gameId = _gameId;
+    if (userId == null || gameId == null) return;
+    try {
+      await _socketService.connect(userId);
+      if (!mounted) return;
+      _socketService.reconnectGame(userId, gameId);
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+            content: Text('Could not reconnect to the match. Showing your last board.')),
+      );
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // App going to background / being killed: persist so we can resume later.
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _persistSnapshot();
+    }
+  }
+
+  void _restoreFromSnapshot(GameSnapshot s) {
+    _board = SudokuBoard(
+      original: s.puzzle.map((r) => List<int>.from(r)).toList(),
+      current: s.current.map((r) => List<int>.from(r)).toList(),
+    );
+    _solution = s.solution?.map((r) => List<int>.from(r)).toList();
+    _gameId = s.gameId;
+    _difficulty = s.difficulty;
+    _selectedRow = 4;
+    _selectedCol = 4;
+    _moveHistory
+      ..clear()
+      ..addAll(s.moves.map((m) => _Move(m[0], m[1], m[2], false)));
+    _elapsedSeconds = s.elapsedSeconds;
+    _mistakes = s.mistakes;
+    _gameEnded = false;
+    _lost = false;
+    _awaitingFinish = false;
+    _gameStateErrorShown = false;
+    _noteMode = false;
+    _postMatchPracticeMode = false;
+    _showBackAfterMatch = false;
+    _cellNotes
+      ..clear()
+      ..addAll(s.notes.map((k, v) => MapEntry(k, v.toSet())));
+    _playerName = s.playerName;
+    _opponentName = s.opponentName;
+    _playerRating = s.playerRating;
+    _opponentRating = s.opponentRating;
+    _opponentId = s.opponentId;
+    _opponentProgressPercent = 0;
+    _opponentMistakes = 0;
+  }
+
+  void _persistSnapshot() {
+    final userId = widget.currentUserId;
+    // Nothing worth resuming: no identity, no server game, already finished, or
+    // just solving the board for fun after the match ended.
+    if (userId == null ||
+        _gameId == null ||
+        _gameEnded ||
+        _awaitingFinish ||
+        _postMatchPracticeMode) {
+      return;
+    }
+    final snapshot = GameSnapshot(
+      userId: userId,
+      gameId: _gameId!,
+      difficulty: _difficulty,
+      multiplayer: _isMultiplayer,
+      puzzle: _board.original.map((r) => List<int>.from(r)).toList(),
+      current: _board.cloneCurrent(),
+      solution: _solution?.map((r) => List<int>.from(r)).toList(),
+      elapsedSeconds: _elapsedSeconds,
+      mistakes: _mistakes,
+      notes: _cellNotes.map((k, v) => MapEntry(k, v.toList())),
+      moves: _moveHistory
+          .map((m) => [m.row, m.col, m.prevValue])
+          .toList(),
+      playerName: _playerName,
+      opponentName: _opponentName,
+      playerRating: _playerRating,
+      opponentRating: _opponentRating,
+      opponentId: _opponentId,
+      savedAt: DateTime.now().millisecondsSinceEpoch,
+    );
+    ActiveGameStore.save(snapshot);
   }
 
   @override
@@ -163,6 +279,11 @@ class _GameScreenState extends State<GameScreen> {
 
   @override
   void dispose() {
+    // Leaving the screen normally (pop / surrender / finished) means there is
+    // nothing to resume — a process-kill skips dispose, so the snapshot saved
+    // on the last pause survives for next launch.
+    ActiveGameStore.clear();
+    WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
     for (final s in _subs) {
       s.cancel();
@@ -235,12 +356,16 @@ class _GameScreenState extends State<GameScreen> {
     _subs.add(_socketService.ratingUpdateStream.listen((payload) {
       if (!mounted) return;
       final ratings = payload['ratings'];
+      final deltas = payload['deltas'];
       if (ratings is! Map) return;
 
       setState(() {
         final me = widget.currentUserId;
         if (me != null && ratings[me] is num) {
           _playerRating = (ratings[me] as num).toInt();
+          if (deltas is Map && deltas[me] is num) {
+            _lastRatingDelta = (deltas[me] as num).toInt();
+          }
         }
         if (_opponentId != null && ratings[_opponentId] is num) {
           _opponentRating = (ratings[_opponentId] as num).toInt();
@@ -415,7 +540,6 @@ class _GameScreenState extends State<GameScreen> {
       _selectedRow = 4;
       _selectedCol = 4;
       _moveHistory.clear();
-      _invalidCells.clear();
       _elapsedSeconds = 0;
       _mistakes = 0;
       _gameEnded = false;
@@ -443,7 +567,6 @@ class _GameScreenState extends State<GameScreen> {
     _selectedRow = 4;
     _selectedCol = 4;
     _moveHistory.clear();
-    _invalidCells.clear();
     _elapsedSeconds = 0;
     _mistakes = 0;
     _gameEnded = false;
@@ -492,9 +615,13 @@ class _GameScreenState extends State<GameScreen> {
     int count = 0;
     for (int row = 0; row < 9; row++) {
       for (int col = 0; col < 9; col++) {
-        if (_board.original[row][col] == 0 && _board.current[row][col] != 0) {
-          count++;
-        }
+        if (_board.original[row][col] != 0) continue;
+        final v = _board.current[row][col];
+        if (v == 0) continue;
+        final correct = _solution != null
+            ? v == _solution![row][col]
+            : !_displayInvalidCells.contains(_cellKey(row, col));
+        if (correct) count++;
       }
     }
     return count;
@@ -538,6 +665,80 @@ class _GameScreenState extends State<GameScreen> {
     return true;
   }
 
+  Set<String> get _displayInvalidCells {
+    if (!widget.highlightMistakes) return const {};
+
+    if (_solution != null) {
+      final invalid = <String>{};
+      for (int r = 0; r < 9; r++) {
+        for (int c = 0; c < 9; c++) {
+          if (_board.original[r][c] == 0 &&
+              _board.current[r][c] != 0 &&
+              _board.current[r][c] != _solution![r][c]) {
+            invalid.add(_cellKey(r, c));
+          }
+        }
+      }
+      return invalid;
+    }
+
+    // No solution available: flag every user-placed cell that duplicates a value
+    // in the same row, column, or 3x3 box.
+    final conflicts = <String>{};
+
+    for (int r = 0; r < 9; r++) {
+      final seen = <int, List<int>>{};
+      for (int c = 0; c < 9; c++) {
+        final v = _board.current[r][c];
+        if (v != 0) seen.putIfAbsent(v, () => []).add(c);
+      }
+      for (final cols in seen.values) {
+        if (cols.length > 1) {
+          for (final c in cols) {
+            if (!_board.isCellLocked(r, c)) conflicts.add(_cellKey(r, c));
+          }
+        }
+      }
+    }
+
+    for (int c = 0; c < 9; c++) {
+      final seen = <int, List<int>>{};
+      for (int r = 0; r < 9; r++) {
+        final v = _board.current[r][c];
+        if (v != 0) seen.putIfAbsent(v, () => []).add(r);
+      }
+      for (final rows in seen.values) {
+        if (rows.length > 1) {
+          for (final r in rows) {
+            if (!_board.isCellLocked(r, c)) conflicts.add(_cellKey(r, c));
+          }
+        }
+      }
+    }
+
+    for (int boxR = 0; boxR < 3; boxR++) {
+      for (int boxC = 0; boxC < 3; boxC++) {
+        final seen = <int, List<int>>{};
+        for (int r = boxR * 3; r < boxR * 3 + 3; r++) {
+          for (int c = boxC * 3; c < boxC * 3 + 3; c++) {
+            final v = _board.current[r][c];
+            if (v != 0) seen.putIfAbsent(v, () => []).add(r * 9 + c);
+          }
+        }
+        for (final encoded in seen.values) {
+          if (encoded.length > 1) {
+            for (final e in encoded) {
+              final r = e ~/ 9, c = e % 9;
+              if (!_board.isCellLocked(r, c)) conflicts.add(_cellKey(r, c));
+            }
+          }
+        }
+      }
+    }
+
+    return conflicts;
+  }
+
   double get _accuracyPercent {
     final totalActions = _filledFillableCells + _mistakes;
     if (totalActions <= 0) return 100;
@@ -550,8 +751,14 @@ class _GameScreenState extends State<GameScreen> {
   }) async {
     if (!mounted) return;
 
-    final previousRating = _playerRating - (won ? 20 : -10);
-    final ratingDelta = _playerRating - previousRating;
+    final ratingDelta = _lastRatingDelta;
+    Analytics.capture('match_result', props: {
+      'won': won,
+      'mode': _isMultiplayer ? 'ranked' : _difficulty,
+      'rating_delta': ratingDelta,
+      'duration_seconds': _elapsedSeconds,
+      'mistakes': _mistakes,
+    });
     final result = await showDialog<String>(
       context: context,
       barrierDismissible: false,
@@ -560,6 +767,7 @@ class _GameScreenState extends State<GameScreen> {
         multiplayer: _isMultiplayer,
         allowClose: allowContinueOnClose,
         playerName: _playerName,
+        playerUserId: widget.currentUserId,
         playerRating: _playerRating,
         ratingDelta: ratingDelta,
         timeText: _formatTime(),
@@ -576,21 +784,95 @@ class _GameScreenState extends State<GameScreen> {
       final continuePlaying = await showDialog<bool>(
         context: context,
         builder: (context) {
-          return AlertDialog(
-            title: const Text('Result Closed'),
-            content: const Text(
-              'Do you want to keep solving this board locally, or go back?',
+          return Dialog(
+            backgroundColor: Colors.white,
+            insetPadding: const EdgeInsets.symmetric(horizontal: 32),
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(24, 26, 24, 22),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: 58,
+                    height: 58,
+                    decoration: const BoxDecoration(
+                      color: AppColors.surfaceContainerHigh,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.grid_view_rounded,
+                        color: AppColors.primary, size: 28),
+                  ),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Keep Playing?',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.onSurface,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    'The match is over. Finish this board at your own pace, or head back to the lobby.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      height: 1.45,
+                      color: AppColors.onSurfaceVariant,
+                    ),
+                  ),
+                  const SizedBox(height: 22),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: SizedBox(
+                          height: 50,
+                          child: OutlinedButton(
+                            style: OutlinedButton.styleFrom(
+                              side: const BorderSide(
+                                  color: AppColors.outlineVariant, width: 1.5),
+                              foregroundColor: AppColors.onSurface,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14)),
+                            ),
+                            onPressed: () => Navigator.of(context).pop(false),
+                            child: const Text(
+                              'Go Back',
+                              style: TextStyle(
+                                  fontSize: 15, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: SizedBox(
+                          height: 50,
+                          child: ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: AppColors.primary,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14)),
+                            ),
+                            onPressed: () => Navigator.of(context).pop(true),
+                            child: const Text(
+                              'Keep Solving',
+                              style: TextStyle(
+                                  fontSize: 15, fontWeight: FontWeight.w700),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(context).pop(false),
-                child: const Text('Back'),
-              ),
-              ElevatedButton(
-                onPressed: () => Navigator.of(context).pop(true),
-                child: const Text('Continue'),
-              ),
-            ],
           );
         },
       );
@@ -704,7 +986,6 @@ class _GameScreenState extends State<GameScreen> {
     }
 
     final previous = _board.current[row][col];
-    final wasInvalid = _invalidCells.contains(_cellKey(row, col));
     if (previous == number) return;
 
     final isWrong = _solution != null
@@ -712,20 +993,16 @@ class _GameScreenState extends State<GameScreen> {
         : !_isValidPlacement(row, col, number);
 
     setState(() {
-      _moveHistory.add(_Move(row, col, previous, wasInvalid));
+      _moveHistory.add(_Move(row, col, previous, false));
       _board.setCell(row, col, number);
       if (isWrong) {
         _mistakes += 1;
-        if (widget.highlightMistakes) {
-          _invalidCells.add(_cellKey(row, col));
-        }
-      } else {
-        _invalidCells.remove(_cellKey(row, col));
       }
       _cellNotes.remove(_noteKey(row, col));
     });
 
     _reportProgress();
+    _persistSnapshot();
 
     if (!_isMultiplayer && !_gameEnded && _mistakes >= 3) {
       setState(() {
@@ -760,11 +1037,6 @@ class _GameScreenState extends State<GameScreen> {
       _board.setCell(last.row, last.col, last.prevValue);
       _selectedRow = last.row;
       _selectedCol = last.col;
-      if (last.wasInvalid) {
-        _invalidCells.add(_cellKey(last.row, last.col));
-      } else {
-        _invalidCells.remove(_cellKey(last.row, last.col));
-      }
     });
 
     _reportProgress();
@@ -782,53 +1054,10 @@ class _GameScreenState extends State<GameScreen> {
         }
       }
       _moveHistory.clear();
-      _invalidCells.clear();
       _cellNotes.clear();
     });
 
     _reportProgress();
-  }
-
-  Future<void> _onHint() async {
-    if (_isMultiplayer) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Hint is disabled in multiplayer matches.')),
-      );
-      return;
-    }
-
-    if (_gameId == null) return;
-    final hint =
-        await GameApiService.hint(board: _board.current, gameId: _gameId!);
-    if (!mounted || hint == null) return;
-
-    final row = hint['row']!;
-    final col = hint['col']!;
-    final value = hint['value']!;
-    if (_board.isCellLocked(row, col)) return;
-
-    setState(() {
-      _moveHistory.add(
-        _Move(row, col, _board.current[row][col],
-            _invalidCells.contains(_cellKey(row, col))),
-      );
-      _board.setCell(row, col, value);
-      _selectedRow = row;
-      _selectedCol = col;
-      _invalidCells.remove(_cellKey(row, col));
-    });
-
-    _reportProgress();
-
-    if (!_gameEnded && _isSolvedLocally()) {
-      setState(() {
-        _gameEnded = true;
-        _lost = false;
-      });
-      await _openResultScreen(won: true, allowContinueOnClose: true);
-    }
   }
 
   String _formatTime() {
@@ -837,29 +1066,144 @@ class _GameScreenState extends State<GameScreen> {
     return '$minutes:$seconds';
   }
 
+  void _surrender() {
+    Analytics.capture('match_surrendered', props: {
+      'mode': _isMultiplayer ? 'ranked' : _difficulty,
+      'elapsed_seconds': _elapsedSeconds,
+    });
+    if (Navigator.of(context).canPop()) {
+      // Leaving the screen disposes the socket, so the opponent is awarded the
+      // match by forfeit on the server side.
+      Navigator.of(context).pop();
+    }
+  }
+
   void _showGameMenu() {
-    showModalBottomSheet<void>(
+    // Single centered window: title, a hide-ratings toggle, a destructive
+    // Surrender action, and a resume button. Tapping the scrim closes it.
+    showDialog<void>(
       context: context,
-      builder: (context) {
-        return SafeArea(
-          child: Wrap(
-            children: [
-              ListTile(
-                leading: const Icon(Icons.flag),
-                title: const Text('Resume match'),
-                onTap: () => Navigator.of(context).pop(),
-              ),
-              ListTile(
-                leading: const Icon(Icons.home_outlined),
-                title: const Text('Exit to Home'),
-                onTap: () {
-                  Navigator.of(context).pop();
-                  if (Navigator.of(this.context).canPop()) {
-                    Navigator.of(this.context).pop();
-                  }
-                },
-              ),
-            ],
+      barrierDismissible: true,
+      barrierColor: Colors.black.withValues(alpha: 0.45),
+      builder: (dialogContext) {
+        return Dialog(
+          backgroundColor: AppColors.surfaceContainerLowest,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 40),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(22, 20, 22, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Row(
+                  children: [
+                    const Text(
+                      'Game Options',
+                      style: TextStyle(
+                        fontSize: 19,
+                        fontWeight: FontWeight.w800,
+                        color: AppColors.onSurface,
+                      ),
+                    ),
+                    const Spacer(),
+                    InkWell(
+                      onTap: () => Navigator.of(dialogContext).pop(),
+                      borderRadius: BorderRadius.circular(20),
+                      child: Container(
+                        width: 32,
+                        height: 32,
+                        decoration: const BoxDecoration(
+                          color: AppColors.surfaceContainerHigh,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(Icons.close,
+                            size: 18, color: AppColors.onSurfaceVariant),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                // Hide ratings toggle row.
+                StatefulBuilder(
+                  builder: (ctx, setLocal) => Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceContainerLow,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.visibility_off_outlined,
+                            size: 20, color: AppColors.onSurfaceVariant),
+                        const SizedBox(width: 12),
+                        const Expanded(
+                          child: Text(
+                            'Hide ratings during game',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.onSurface,
+                            ),
+                          ),
+                        ),
+                        Switch(
+                          value: _hideRatings,
+                          activeThumbColor: Colors.white,
+                          activeTrackColor: AppColors.primary,
+                          onChanged: (v) {
+                            setLocal(() {});
+                            setState(() => _hideRatings = v);
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                SizedBox(
+                  height: 52,
+                  child: ElevatedButton.icon(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.error,
+                      foregroundColor: Colors.white,
+                      elevation: 0,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: () {
+                      Navigator.of(dialogContext).pop();
+                      _surrender();
+                    },
+                    icon: const Icon(Icons.flag_outlined, size: 20),
+                    label: const Text(
+                      'Surrender Match',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 52,
+                  child: TextButton(
+                    style: TextButton.styleFrom(
+                      foregroundColor: AppColors.onSurface,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14)),
+                    ),
+                    onPressed: () => Navigator.of(dialogContext).pop(),
+                    child: const Text(
+                      'Resume Game',
+                      style:
+                          TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ),
+              ],
+            ),
           ),
         );
       },
@@ -870,14 +1214,13 @@ class _GameScreenState extends State<GameScreen> {
   Widget build(BuildContext context) {
     final cardColor = Colors.white;
     return Scaffold(
-      backgroundColor: const Color(0xFFF2F4F8),
+      backgroundColor: AppColors.surface,
       body: SafeArea(
         child: Padding(
           padding: const EdgeInsets.fromLTRB(14, 8, 14, 18),
           child: Column(
             children: [
               _TopStatusRow(
-                rating: _playerRating,
                 timeText: widget.timerEnabled ? _formatTime() : '--:--',
                 onMenuTap: _showGameMenu,
                 showBackButton: _showBackAfterMatch,
@@ -887,12 +1230,15 @@ class _GameScreenState extends State<GameScreen> {
                   }
                 },
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               _VersusHeader(
                 playerName: _playerName,
                 opponentName: _opponentName,
+                playerUserId: widget.currentUserId,
+                opponentUserId: _opponentId,
                 playerRating: _playerRating,
                 opponentRating: _opponentRating,
+                showRatings: !_hideRatings,
               ),
               const SizedBox(height: 10),
               _ProgressPanel(
@@ -930,7 +1276,7 @@ class _GameScreenState extends State<GameScreen> {
                         selectedRow: _selectedRow,
                         selectedCol: _selectedCol,
                         onCellTap: _onCellTap,
-                        invalidCells: _invalidCells,
+                        invalidCells: _displayInvalidCells,
                         notes: _cellNotes,
                       ),
                     ),
@@ -941,7 +1287,6 @@ class _GameScreenState extends State<GameScreen> {
               _ActionButtonsRow(
                 onUndo: _onUndo,
                 onErase: _onErase,
-                onHint: _onHint,
                 noteMode: _noteMode,
                 onToggleNotes: () {
                   setState(() {
@@ -960,14 +1305,12 @@ class _GameScreenState extends State<GameScreen> {
 }
 
 class _TopStatusRow extends StatelessWidget {
-  final int rating;
   final String timeText;
   final VoidCallback onMenuTap;
   final bool showBackButton;
   final VoidCallback? onBackTap;
 
   const _TopStatusRow({
-    required this.rating,
     required this.timeText,
     required this.onMenuTap,
     this.showBackButton = false,
@@ -981,37 +1324,35 @@ class _TopStatusRow extends StatelessWidget {
         if (showBackButton)
           IconButton(
             onPressed: onBackTap,
-            icon: const Icon(Icons.arrow_back, color: Color(0xFF0E46A7)),
+            icon: const Icon(Icons.arrow_back, color: AppColors.primary),
           )
         else
-          const SizedBox(width: 6),
-        const SizedBox(width: 6),
-        const CircleAvatar(
-          radius: 18,
-          backgroundColor: Color(0xFFDEE5F2),
-          child: Icon(Icons.person, color: Color(0xFF0E46A7)),
-        ),
-        const SizedBox(width: 8),
-        Text(
-          '$rating',
-          style: const TextStyle(
-            color: Color(0xFF0E46A7),
-            fontSize: 30,
-            fontWeight: FontWeight.w800,
+          const SizedBox(width: 48),
+        Expanded(
+          child: Center(
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.timer_outlined,
+                    size: 20, color: AppColors.primary),
+                const SizedBox(width: 6),
+                Text(
+                  timeText,
+                  style: const TextStyle(
+                    color: AppColors.primary,
+                    fontSize: 24,
+                    fontWeight: FontWeight.w800,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
-        const SizedBox(width: 10),
-        const Icon(Icons.timer_outlined, size: 16, color: Color(0xFF64748B)),
-        const SizedBox(width: 4),
-        Text(
-          timeText,
-          style: const TextStyle(
-            color: Color(0xFF64748B),
-            fontWeight: FontWeight.w600,
-          ),
+        IconButton(
+          onPressed: onMenuTap,
+          icon: const Icon(Icons.settings, color: AppColors.onSurfaceVariant),
         ),
-        const Spacer(),
-        IconButton(onPressed: onMenuTap, icon: const Icon(Icons.settings)),
       ],
     );
   }
@@ -1020,14 +1361,20 @@ class _TopStatusRow extends StatelessWidget {
 class _VersusHeader extends StatelessWidget {
   final String playerName;
   final String opponentName;
+  final String? playerUserId;
+  final String? opponentUserId;
   final int playerRating;
   final int opponentRating;
+  final bool showRatings;
 
   const _VersusHeader({
     required this.playerName,
     required this.opponentName,
+    this.playerUserId,
+    this.opponentUserId,
     required this.playerRating,
     required this.opponentRating,
+    this.showRatings = true,
   });
 
   @override
@@ -1047,10 +1394,9 @@ class _VersusHeader extends StatelessWidget {
       ),
       child: Row(
         children: [
-          const CircleAvatar(
-            radius: 16,
-            backgroundColor: Color(0xFFE5E7EB),
-            child: Icon(Icons.person, color: Color(0xFF0E46A7), size: 18),
+          UserAvatar(
+            userId: playerUserId ?? 'player',
+            size: 32,
           ),
           const SizedBox(width: 8),
           Expanded(
@@ -1063,25 +1409,31 @@ class _VersusHeader extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontWeight: FontWeight.w700,
-                    color: Color(0xFF1F2937),
+                    color: AppColors.onSurface,
                   ),
                 ),
-                Text(
-                  '$playerRating ELO',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF0E46A7),
-                    fontWeight: FontWeight.w600,
+                if (showRatings)
+                  Text(
+                    '$playerRating',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppColors.primary,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
               ],
             ),
           ),
-          const Text(
-            'VS',
-            style: TextStyle(
-              color: Color(0xFF9CA3AF),
-              fontWeight: FontWeight.w700,
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 6),
+            child: Text(
+              '/',
+              style: TextStyle(
+                color: AppColors.primary,
+                fontSize: 28,
+                fontStyle: FontStyle.italic,
+                fontWeight: FontWeight.w900,
+              ),
             ),
           ),
           Expanded(
@@ -1094,25 +1446,25 @@ class _VersusHeader extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: const TextStyle(
                     fontWeight: FontWeight.w700,
-                    color: Color(0xFF1F2937),
+                    color: AppColors.onSurface,
                   ),
                 ),
-                Text(
-                  '$opponentRating ELO',
-                  style: const TextStyle(
-                    fontSize: 11,
-                    color: Color(0xFF6B7280),
-                    fontWeight: FontWeight.w600,
+                if (showRatings)
+                  Text(
+                    '$opponentRating',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      color: AppColors.onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
               ],
             ),
           ),
           const SizedBox(width: 8),
-          const CircleAvatar(
-            radius: 16,
-            backgroundColor: Color(0xFF0A0D14),
-            child: Icon(Icons.person, color: Colors.white, size: 18),
+          UserAvatar(
+            userId: opponentUserId ?? 'opponent',
+            size: 32,
           ),
         ],
       ),
@@ -1137,7 +1489,7 @@ class _ProgressPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      padding: const EdgeInsets.fromLTRB(14, 8, 14, 9),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(12),
@@ -1152,93 +1504,83 @@ class _ProgressPanel extends StatelessWidget {
       child: Column(
         children: [
           Row(
-            children: [
-              const Text(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: const [
+              Text(
                 'PROGRESS',
                 style: TextStyle(
                   fontSize: 11,
                   letterSpacing: 0.8,
-                  color: Color(0xFF64748B),
+                  color: AppColors.onSurfaceVariant,
                   fontWeight: FontWeight.w700,
                 ),
               ),
-              const Spacer(),
-              const Text(
-                'MATCH POINT',
-                style: TextStyle(
-                  fontSize: 11,
-                  letterSpacing: 0.8,
-                  color: Color(0xFF0E46A7),
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-              const Spacer(),
-              const Text(
+              Text(
                 'OPPONENT',
                 style: TextStyle(
                   fontSize: 11,
                   letterSpacing: 0.8,
-                  color: Color(0xFF64748B),
+                  color: AppColors.onSurfaceVariant,
                   fontWeight: FontWeight.w700,
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 4),
           Row(
             children: [
               Text(
                 '$playerProgress%',
                 style: const TextStyle(
-                  fontSize: 30,
+                  fontSize: 24,
                   fontWeight: FontWeight.w800,
-                  color: Color(0xFF10151E),
+                  color: AppColors.onSurface,
                 ),
               ),
               const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFE8EEFF),
+                  color: AppColors.surfaceContainerHigh,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
                   'M:$mistakes',
                   style: const TextStyle(
-                    color: Color(0xFF0E46A7),
+                    color: AppColors.primary,
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
               const Spacer(),
-              Text(
-                '$opponentProgress%',
-                style: const TextStyle(
-                  fontSize: 30,
-                  fontWeight: FontWeight.w800,
-                  color: Color(0xFF10151E),
-                ),
-              ),
-              const SizedBox(width: 8),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFEE4E2),
+                  color: AppColors.errorContainer,
                   borderRadius: BorderRadius.circular(999),
                 ),
                 child: Text(
                   'M:$opponentMistakes',
                   style: const TextStyle(
-                    color: Color(0xFFB42318),
+                    color: AppColors.error,
                     fontSize: 12,
                     fontWeight: FontWeight.w700,
                   ),
                 ),
               ),
+              const SizedBox(width: 8),
+              Text(
+                '$opponentProgress%',
+                style: const TextStyle(
+                  fontSize: 24,
+                  fontWeight: FontWeight.w800,
+                  color: AppColors.onSurface,
+                ),
+              ),
             ],
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 7),
           _HeadToHeadProgressBar(
             playerProgress: playerProgress,
             opponentProgress: opponentProgress,
@@ -1260,49 +1602,55 @@ class _HeadToHeadProgressBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final player = playerProgress.clamp(0, 100).toDouble();
-    final opponent = opponentProgress.clamp(0, 100).toDouble();
-    final total = (player + opponent) <= 0 ? 1.0 : (player + opponent);
-    final playerShare = player / total;
-    final opponentShare = opponent / total;
+    // Two independent absolute meters (each 0-100% of its own fill). A previous
+    // version drew relative shares (player / (player + opponent)), which made a
+    // bar shrink when the other side advanced and froze at 50/50 when tied.
+    return Column(
+      children: [
+        _AbsoluteBar(
+          percent: playerProgress,
+          color: AppColors.primary,
+        ),
+        const SizedBox(height: 6),
+        _AbsoluteBar(
+          percent: opponentProgress,
+          color: AppColors.error,
+        ),
+      ],
+    );
+  }
+}
 
+/// A single progress track that fills left-to-right by an absolute [percent]
+/// (0-100), animating smoothly to each new value.
+class _AbsoluteBar extends StatelessWidget {
+  final int percent;
+  final Color color;
+
+  const _AbsoluteBar({required this.percent, required this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    final fraction = (percent.clamp(0, 100)) / 100.0;
     return Container(
       height: 9,
       decoration: BoxDecoration(
-        color: const Color(0xFFD3D9E4),
+        color: AppColors.outlineVariant,
         borderRadius: BorderRadius.circular(999),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(999),
-        child: LayoutBuilder(
-          builder: (context, constraints) {
-            final width = constraints.maxWidth;
-            final playerWidth = (width * playerShare).clamp(0.0, width);
-            final opponentWidth = (width * opponentShare).clamp(0.0, width);
-
-            return Stack(
-              children: [
-                Align(
-                  alignment: Alignment.centerLeft,
-                  child: Container(
-                    width: playerWidth,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFF2FA8FF),
-                    ),
-                  ),
-                ),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: Container(
-                    width: opponentWidth,
-                    decoration: const BoxDecoration(
-                      color: Color(0xFFFF5A5F),
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
+        child: Align(
+          alignment: Alignment.centerLeft,
+          child: TweenAnimationBuilder<double>(
+            tween: Tween<double>(begin: 0, end: fraction),
+            duration: const Duration(milliseconds: 350),
+            curve: Curves.easeOut,
+            builder: (context, value, _) => FractionallySizedBox(
+              widthFactor: value.clamp(0.0, 1.0),
+              child: Container(color: color),
+            ),
+          ),
         ),
       ),
     );
@@ -1312,14 +1660,12 @@ class _HeadToHeadProgressBar extends StatelessWidget {
 class _ActionButtonsRow extends StatelessWidget {
   final VoidCallback onUndo;
   final VoidCallback onErase;
-  final Future<void> Function() onHint;
   final bool noteMode;
   final VoidCallback onToggleNotes;
 
   const _ActionButtonsRow({
     required this.onUndo,
     required this.onErase,
-    required this.onHint,
     required this.noteMode,
     required this.onToggleNotes,
   });
@@ -1327,7 +1673,7 @@ class _ActionButtonsRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
         _GameActionButton(
           icon: Icons.undo_rounded,
@@ -1345,13 +1691,6 @@ class _ActionButtonsRow extends StatelessWidget {
           badge: noteMode ? 'ON' : 'OFF',
           highlighted: noteMode,
           onTap: onToggleNotes,
-        ),
-        _GameActionButton(
-          icon: Icons.lightbulb_outline,
-          label: 'HINT',
-          onTap: () {
-            onHint();
-          },
         ),
       ],
     );
@@ -1396,8 +1735,8 @@ class _GameActionButton extends StatelessWidget {
               height: 42,
               decoration: BoxDecoration(
                 color: highlighted
-                    ? const Color(0xFF0E53BE)
-                    : const Color(0xFFE9EDF4),
+                    ? AppColors.primary
+                    : AppColors.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Stack(
@@ -1407,7 +1746,7 @@ class _GameActionButton extends StatelessWidget {
                       icon,
                       size: 22,
                       color:
-                          highlighted ? Colors.white : const Color(0xFF374151),
+                          highlighted ? Colors.white : AppColors.onSurfaceVariant,
                     ),
                   ),
                   if (badge != null)
@@ -1420,7 +1759,7 @@ class _GameActionButton extends StatelessWidget {
                         decoration: BoxDecoration(
                           color: highlighted
                               ? Colors.white
-                              : const Color(0xFFD1D5DB),
+                              : AppColors.outlineVariant,
                           borderRadius: BorderRadius.circular(999),
                         ),
                         child: Text(
@@ -1429,8 +1768,8 @@ class _GameActionButton extends StatelessWidget {
                             fontSize: 8,
                             fontWeight: FontWeight.w700,
                             color: highlighted
-                                ? const Color(0xFF0E53BE)
-                                : const Color(0xFF6B7280),
+                                ? AppColors.primary
+                                : AppColors.onSurfaceVariant,
                           ),
                         ),
                       ),
@@ -1445,8 +1784,8 @@ class _GameActionButton extends StatelessWidget {
                 fontSize: 10,
                 fontWeight: FontWeight.w700,
                 color: highlighted
-                    ? const Color(0xFF0E53BE)
-                    : const Color(0xFF6B7280),
+                    ? AppColors.primary
+                    : AppColors.onSurfaceVariant,
               ),
             ),
           ],
@@ -1464,24 +1803,25 @@ class _NumberInputRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12.0),
+      padding: const EdgeInsets.symmetric(horizontal: 4.0),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: List.generate(9, (i) {
-          return GestureDetector(
-            onTap: () {
-              onNumberInput(i + 1);
-            },
-            child: Container(
-              width: 34,
-              height: 44,
-              alignment: Alignment.center,
-              child: Text(
-                '${i + 1}',
-                style: const TextStyle(
-                  fontSize: 36,
-                  color: Color(0xFF0E53BE),
-                  fontWeight: FontWeight.w600,
+          return Expanded(
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                onNumberInput(i + 1);
+              },
+              child: Container(
+                height: 48,
+                alignment: Alignment.center,
+                child: Text(
+                  '${i + 1}',
+                  style: TextStyle(
+                    fontSize: 34,
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
               ),
             ),

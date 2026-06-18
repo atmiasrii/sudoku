@@ -69,65 +69,111 @@ class _SudokuRoyaleLogo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 220,
-      padding: const EdgeInsets.fromLTRB(24, 24, 24, 20),
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.all(Radius.circular(4)),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          SizedBox(
-            width: 156,
-            height: 156,
-            child: _buildLogoGrid(),
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: const [
+        SizedBox(
+          width: 200,
+          height: 200,
+          child: CustomPaint(painter: _SudokuLogoPainter()),
+        ),
+        SizedBox(height: 26),
+        Text(
+          'SUDOKU ROYALE',
+          style: TextStyle(
+            color: Colors.white,
+            fontSize: 14,
+            fontWeight: FontWeight.w400,
+            letterSpacing: 3,
           ),
-          const SizedBox(height: 14),
-          const Text(
-            'SUDOKU ROYALE',
-            style: TextStyle(
-              color: Colors.black,
-              fontSize: 13,
-              fontWeight: FontWeight.w300,
-              letterSpacing: 2.5,
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
+  }
+}
+
+/// Draws the app-logo sudoku board (matches the launcher icon): a white rounded
+/// 4x4 board with thin inner lines, a bold 2x2 sub-box divider, a bold outer
+/// frame, and the fixed numbers (2 / 4,0 / -- / 6,9).
+class _SudokuLogoPainter extends CustomPainter {
+  const _SudokuLogoPainter();
+
+  static const _ink = Color(0xFF1A1A1A);
+  static const _numbers = [
+    [0, 1, '2'],
+    [1, 0, '4'],
+    [1, 2, '0'],
+    [3, 1, '6'],
+    [3, 2, '9'],
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final board = size.width;
+    final radius = Radius.circular(board * 0.14);
+    final rrect = RRect.fromRectAndRadius(Offset.zero & size, radius);
+
+    // White board.
+    canvas.drawRRect(rrect, Paint()..color = Colors.white);
+
+    final cell = board / 4;
+    final thin = board * 0.012;
+    final thick = board * 0.030;
+    final line = Paint()
+      ..color = _ink
+      ..style = PaintingStyle.stroke;
+
+    canvas.save();
+    canvas.clipRRect(rrect);
+
+    // Thin inner grid lines.
+    line.strokeWidth = thin;
+    for (final i in [1, 3]) {
+      canvas.drawLine(Offset(i * cell, 0), Offset(i * cell, board), line);
+      canvas.drawLine(Offset(0, i * cell), Offset(board, i * cell), line);
+    }
+    // Bold middle 2x2 divider.
+    line.strokeWidth = thick;
+    canvas.drawLine(Offset(2 * cell, 0), Offset(2 * cell, board), line);
+    canvas.drawLine(Offset(0, 2 * cell), Offset(board, 2 * cell), line);
+    canvas.restore();
+
+    // Bold rounded outer frame.
+    final inset = thick / 2;
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(
+        Rect.fromLTWH(inset, inset, board - thick, board - thick),
+        Radius.circular(board * 0.14 - inset),
+      ),
+      line..strokeWidth = thick,
+    );
+
+    // Numbers.
+    for (final n in _numbers) {
+      final row = n[0] as int;
+      final col = n[1] as int;
+      final value = n[2] as String;
+      final tp = TextPainter(
+        text: TextSpan(
+          text: value,
+          style: TextStyle(
+            color: _ink,
+            fontSize: cell * 0.6,
+            fontWeight: FontWeight.w700,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      tp.paint(
+        canvas,
+        Offset(
+          col * cell + (cell - tp.width) / 2,
+          row * cell + (cell - tp.height) / 2,
+        ),
+      );
+    }
   }
 
-  Widget _buildLogoGrid() {
-    return Column(
-      children: List.generate(3, (row) {
-        return Expanded(
-          child: Row(
-            children: List.generate(3, (col) {
-              final isCenter = row == 1 && col == 1;
-              return Expanded(
-                child: Container(
-                  margin: const EdgeInsets.all(2.5),
-                  decoration: BoxDecoration(
-                    color: isCenter ? Colors.black : Colors.transparent,
-                    border: Border.all(color: Colors.black, width: 1.5),
-                  ),
-                  child: isCenter
-                      ? const Center(
-                          child: Icon(
-                            Icons.workspace_premium,
-                            color: Colors.white,
-                            size: 22,
-                          ),
-                        )
-                      : null,
-                ),
-              );
-            }),
-          ),
-        );
-      }),
-    );
-  }
+  @override
+  bool shouldRepaint(covariant _SudokuLogoPainter oldDelegate) => false;
 }

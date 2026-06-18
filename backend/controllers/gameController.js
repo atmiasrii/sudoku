@@ -3,14 +3,26 @@ const { generatePuzzle } = require('../services/sudokuGenerator');
 const { isValidMove, isBoardComplete } = require('../services/sudokuValidator');
 const { cloneBoard } = require('../utils/sudokuHelpers');
 const { storeMatchResult, getPlayerMatchHistory } = require('../services/gameService');
+const { isUserId, clampInt } = require('../utils/validators');
 const {
   createSession,
   getSession,
   updateProgress,
   finishSession,
 } = require('../services/gameSessionService');
+const {
+  etDateString,
+  etSeedForDate,
+  etDayNumber,
+  nextEtMidnightUtcIso,
+} = require('../utils/etDate');
 
 const games = {};
+
+// One generated daily challenge per ET date, so every request that day returns
+// the identical puzzle without regenerating it.
+const dailyCache = {};
+const DAILY_DIFFICULTY = 'hard';
 
 function isBoardShapeValid(board) {
   return (
@@ -54,16 +66,49 @@ function createGameSession({ difficulty, seed }) {
   };
 }
 
+function parseSeed(rawSeed) {
+  if (rawSeed === undefined || rawSeed === '') return undefined;
+  return clampInt(rawSeed, 0, Number.MAX_SAFE_INTEGER, undefined);
+}
+
 function newGame(req, res) {
   const difficulty = sanitizeDifficulty(req.query.difficulty);
-  const seed = req.query.seed ? Number(req.query.seed) : undefined;
+  const seed = parseSeed(req.query.seed);
   return res.json(createGameSession({ difficulty, seed }));
 }
 
 function getPuzzle(req, res) {
   const difficulty = sanitizeDifficulty(req.query.difficulty);
-  const seed = req.query.seed ? Number(req.query.seed) : undefined;
+  const seed = parseSeed(req.query.seed);
   return res.json(createGameSession({ difficulty, seed }));
+}
+
+// Today's daily challenge. The puzzle is keyed by the ET calendar date so it is
+// identical for everyone and rotates at ET midnight. `expiresAt` lets the client
+// run a live countdown without doing any timezone math itself.
+function dailyChallenge(req, res) {
+  const date = etDateString();
+
+  if (!dailyCache[date]) {
+    const seed = etSeedForDate(date);
+    const session = createGameSession({ difficulty: DAILY_DIFFICULTY, seed });
+    dailyCache[date] = {
+      date,
+      dayNumber: etDayNumber(date),
+      difficulty: DAILY_DIFFICULTY,
+      seed,
+      puzzle: session.puzzle,
+      solution: session.solution,
+      gameId: session.gameId,
+    };
+  }
+
+  // expiresAt is recomputed per response (cheap) so it always reflects the
+  // remaining time, while the puzzle stays cached.
+  return res.json({
+    ...dailyCache[date],
+    expiresAt: nextEtMidnightUtcIso(),
+  });
 }
 
 function validateMove(req, res) {
@@ -176,6 +221,10 @@ function createMatchSession(req, res) {
     return res.status(400).json({ message: 'player1Id and player2Id are required' });
   }
 
+  if (!isUserId(player1Id) || !isUserId(player2Id)) {
+    return res.status(400).json({ message: 'Invalid player id' });
+  }
+
   const session = createSession(player1Id, player2Id);
   return res.status(201).json(session);
 }
@@ -197,6 +246,11 @@ function updateMatchSessionProgress(req, res) {
 
   if (!playerId) {
     return res.status(400).json({ message: 'playerId is required' });
+  }
+
+  // When auth is enforced, a player may only update their own progress.
+  if (req.userId && playerId !== req.userId) {
+    return res.status(403).json({ message: 'Cannot update another player' });
   }
 
   const data = {};
@@ -237,6 +291,10 @@ function finishMatchSession(req, res) {
     return res.status(400).json({ message: 'winnerId is required' });
   }
 
+  if (!isUserId(winnerId)) {
+    return res.status(400).json({ message: 'Invalid winner id' });
+  }
+
   const result = finishSession(gameId, winnerId);
   if (!result) {
     return res.status(404).json({ message: 'Session not found' });
@@ -260,13 +318,31 @@ async function storeMatchResultController(req, res) {
       return res.status(400).json({ message: 'player1_id and player2_id are required' });
     }
 
+    if (!isUserId(player1Id) || !isUserId(player2Id)) {
+      return res.status(400).json({ message: 'Invalid player id' });
+    }
+
+    if (winnerId && !isUserId(winnerId)) {
+      return res.status(400).json({ message: 'Invalid winner id' });
+    }
+
+    // winner must be one of the two players — blocks crediting an unrelated id.
+    if (winnerId && winnerId !== player1Id && winnerId !== player2Id) {
+      return res.status(400).json({ message: 'winner_id must be one of the players' });
+    }
+
+    // When auth is enforced, the reporter must be a participant in the match.
+    if (req.userId && req.userId !== player1Id && req.userId !== player2Id) {
+      return res.status(403).json({ message: 'Not a participant in this match' });
+    }
+
     const match = await storeMatchResult({
-      seed,
+      seed: clampInt(seed, 0, Number.MAX_SAFE_INTEGER, 0),
       player1_id: player1Id,
       player2_id: player2Id,
       winner_id: winnerId,
-      duration,
-      mistakes,
+      duration: clampInt(duration, 0, 86400, 0),
+      mistakes: clampInt(mistakes, 0, 999, 0),
     });
 
     return res.status(201).json(match);
@@ -280,8 +356,8 @@ async function getMatchHistoryController(req, res) {
   try {
     const userId = req.params.id;
 
-    if (!userId) {
-      return res.status(400).json({ message: 'user id is required' });
+    if (!isUserId(userId)) {
+      return res.status(400).json({ message: 'Invalid user id' });
     }
 
     const matches = await getPlayerMatchHistory(userId);
@@ -307,4 +383,5 @@ module.exports = {
   finishMatchSession,
   storeMatchResultController,
   getMatchHistoryController,
+  dailyChallenge,
 };

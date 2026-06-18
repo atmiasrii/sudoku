@@ -1,68 +1,82 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../app_colors.dart';
+import '../services/auth_service.dart';
 import '../services/game_api_service.dart';
+import '../widgets/screen_header.dart';
+import '../widgets/user_avatar.dart';
 
 class ProfileScreen extends StatefulWidget {
-  const ProfileScreen({Key? key}) : super(key: key);
+  final String userId;
+  final VoidCallback? onSettingsPressed;
+
+  const ProfileScreen({
+    super.key,
+    required this.userId,
+    this.onSettingsPressed,
+  });
 
   @override
   State<ProfileScreen> createState() => _ProfileScreenState();
 }
 
 class _ProfileScreenState extends State<ProfileScreen> {
-  static final RegExp _uuidPattern = RegExp(
-    r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$',
-  );
-
   bool _loading = true;
-  String _title = 'Analytical Sanctuary';
   String _userId = 'local_player';
-  String _username = 'Analytical_You';
+  String _username = 'Player';
   int _rating = 1200;
+  int _ratingDelta = 0;
   int _gamesPlayed = 0;
   int _wins = 0;
   int _bestTimeSeconds = 0;
   List<Map<String, dynamic>> _matchHistory = <Map<String, dynamic>>[];
+  RealtimeChannel? _channel;
 
   @override
   void initState() {
     super.initState();
     _loadProfile();
+    _subscribeToRealtime();
   }
 
-  Future<void> _loadProfile() async {
-    setState(() {
-      _loading = true;
-    });
+  @override
+  void dispose() {
+    if (_channel != null) {
+      Supabase.instance.client.removeChannel(_channel!);
+    }
+    super.dispose();
+  }
 
-    final prefs = await SharedPreferences.getInstance();
-    final existing = prefs.getString('local_user_id');
-    final userId = (existing != null && _uuidPattern.hasMatch(existing))
-        ? existing
-        : _generateUuidV4();
-    if (existing != userId) {
-      await prefs.setString('local_user_id', userId);
+  /// [silent] skips the full-screen spinner so a background Realtime refresh
+  /// (a match finishing) updates stats in place instead of flashing the page.
+  Future<void> _loadProfile({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _loading = true;
+      });
     }
 
+    final userId = widget.userId;
     final profile = await GameApiService.getUserProfile(userId);
     final history = await GameApiService.getUserMatchHistory(userId);
 
-    int bestTime = 0;
-    if (history.isNotEmpty) {
-      final durations = history
-          .map((m) => m['duration'])
-          .whereType<num>()
-          .map((n) => n.toInt())
-          .where((s) => s > 0)
-          .toList();
-      if (durations.isNotEmpty) {
-        durations.sort();
-        bestTime = durations.first;
-      }
-    }
+    // Derive stats from the match history (source of truth). The users-table
+    // counters can lag or stay zero (only bumped for some match types), so the
+    // history is what the profile reports.
+    final gamesPlayed = history.length;
+    final wins = history
+        .where((m) => m['winner_id']?.toString() == userId)
+        .length;
+
+    // Best time = fastest completed solve, i.e. the shortest duration among
+    // matches the user won. Falls back to the fastest of any match if no wins.
+    int bestTime = _minDuration(
+        history.where((m) => m['winner_id']?.toString() == userId));
+    if (bestTime == 0) bestTime = _minDuration(history);
+
+    final delta =
+        history.isNotEmpty ? _deltaForViewer(history.first, userId) : 0;
 
     if (!mounted) return;
 
@@ -70,14 +84,79 @@ class _ProfileScreenState extends State<ProfileScreen> {
       _userId = userId;
       _username = (profile?['username']?.toString().isNotEmpty ?? false)
           ? profile!['username'].toString()
-          : 'Analytical_You';
+          : AuthService.instance.displayName();
       _rating = (profile?['rating'] as num?)?.toInt() ?? 1200;
-      _gamesPlayed = (profile?['games_played'] as num?)?.toInt() ?? 0;
-      _wins = (profile?['wins'] as num?)?.toInt() ?? 0;
+      _ratingDelta = delta;
+      _gamesPlayed = gamesPlayed;
+      _wins = wins;
       _bestTimeSeconds = bestTime;
       _matchHistory = history;
       _loading = false;
     });
+  }
+
+  /// Smallest positive `duration` across the given matches, or 0 if none.
+  int _minDuration(Iterable<Map<String, dynamic>> matches) {
+    final durations = matches
+        .map((m) => (m['duration'] as num?)?.toInt() ?? 0)
+        .where((s) => s > 0)
+        .toList();
+    if (durations.isEmpty) return 0;
+    durations.sort();
+    return durations.first;
+  }
+
+  void _subscribeToRealtime() {
+    _channel = Supabase.instance.client
+        .channel('public:users:profile:${widget.userId}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.update,
+          schema: 'public',
+          table: 'users',
+          filter: PostgresChangeFilter(
+            type: PostgresChangeFilterType.eq,
+            column: 'id',
+            value: widget.userId,
+          ),
+          callback: (payload) {
+            final row = payload.newRecord;
+            if (!mounted) return;
+            // Only rating comes from the users row; matches/wins/best-time are
+            // derived from history (refreshed by the games-insert handler).
+            setState(() {
+              _rating = (row['rating'] as num?)?.toInt() ?? _rating;
+            });
+          },
+        )
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'games',
+          callback: (payload) {
+            final row = payload.newRecord;
+            if (row['player1_id'] == widget.userId || row['player2_id'] == widget.userId) {
+              _loadProfile(silent: true);
+            }
+          },
+        )
+        .subscribe();
+  }
+
+  /// The `games` row stores one `rating_delta` (the winner's gain). With a
+  /// fixed K-factor the loser's loss mirrors it, so flip the sign when the
+  /// viewer wasn't the winner.
+  int _deltaForViewer(Map<String, dynamic> match, String userId) {
+    final stored = (match['rating_delta'] as num?)?.toInt() ?? 0;
+    if (stored == 0) return 0;
+    final won = match['winner_id']?.toString() == userId;
+    return won ? stored.abs() : -stored.abs();
+  }
+
+  String _tierForRating(int rating) {
+    if (rating < 1200) return 'Novice';
+    if (rating < 1500) return 'Skilled';
+    if (rating < 1800) return 'Expert';
+    return 'Master';
   }
 
   String _formatDuration(int seconds) {
@@ -86,114 +165,45 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return '$mins:$secs';
   }
 
-  String _generateUuidV4() {
-    final random = Random.secure();
-    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
-
-    bytes[6] = (bytes[6] & 0x0f) | 0x40;
-    bytes[8] = (bytes[8] & 0x3f) | 0x80;
-
-    String toHex(int value) => value.toRadixString(16).padLeft(2, '0');
-
-    final hex = bytes.map(toHex).join();
-    return '${hex.substring(0, 8)}-'
-        '${hex.substring(8, 12)}-'
-        '${hex.substring(12, 16)}-'
-        '${hex.substring(16, 20)}-'
-        '${hex.substring(20, 32)}';
-  }
-
   @override
   Widget build(BuildContext context) {
     final winRate =
         _gamesPlayed > 0 ? ((_wins / _gamesPlayed) * 100).round() : 0;
 
-    return Container(
-      color: const Color(0xFFF1F3F7),
-      child: SafeArea(
+    return Scaffold(
+      backgroundColor: AppColors.surface,
+      body: SafeArea(
         child: _loading
-            ? const Center(child: CircularProgressIndicator())
+            ? const Center(child: CircularProgressIndicator(color: AppColors.primary))
             : RefreshIndicator(
                 onRefresh: _loadProfile,
                 child: ListView(
                   padding: const EdgeInsets.fromLTRB(20, 10, 20, 28),
                   children: [
                     Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        const Icon(Icons.arrow_back, color: Color(0xFF0E46A7)),
-                        const SizedBox(width: 10),
-                        Text(
-                          _title,
-                          style: const TextStyle(
-                            color: Color(0xFF0D2F87),
-                            fontSize: 31,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                        const Spacer(),
-                        IconButton(
-                          onPressed: _loadProfile,
-                          icon: const Icon(Icons.settings,
-                              color: Color(0xFF64748B)),
-                        ),
+                        UserAvatar(userId: widget.userId, size: 96),
+                        SettingsGearButton(onPressed: widget.onSettingsPressed),
                       ],
                     ),
                     const SizedBox(height: 16),
-                    Center(
-                      child: Stack(
-                        children: [
-                          Container(
-                            width: 126,
-                            height: 126,
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(18),
-                              border: Border.all(
-                                  color: const Color(0xFFDBE2EE), width: 3),
-                              image: const DecorationImage(
-                                image: NetworkImage(
-                                  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=400&q=80',
-                                ),
-                                fit: BoxFit.cover,
-                              ),
-                            ),
-                          ),
-                          Positioned(
-                            right: -2,
-                            bottom: -2,
-                            child: Container(
-                              width: 42,
-                              height: 42,
-                              decoration: BoxDecoration(
-                                color: const Color(0xFF0E53BE),
-                                borderRadius: BorderRadius.circular(12),
-                                border:
-                                    Border.all(color: Colors.white, width: 2),
-                              ),
-                              child: const Icon(Icons.settings,
-                                  color: Colors.white, size: 20),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 14),
                     Center(
                       child: Text(
                         _username,
                         style: const TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.w700,
-                          color: Color(0xFF10151E),
+                          color: AppColors.onSurface,
                         ),
                       ),
                     ),
                     const SizedBox(height: 4),
-                    const Center(
+                    Center(
                       child: Text(
-                        'ELITE PUZZLE MASTER',
-                        style: TextStyle(
-                          color: Color(0xFF6B7280),
+                        _tierForRating(_rating).toUpperCase(),
+                        style: const TextStyle(
+                          color: AppColors.onSurfaceVariant,
                           letterSpacing: 1,
                           fontSize: 11,
                           fontWeight: FontWeight.w600,
@@ -206,41 +216,48 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         padding: const EdgeInsets.symmetric(
                             horizontal: 14, vertical: 10),
                         decoration: BoxDecoration(
-                          color: Colors.white,
+                          color: AppColors.surfaceContainerLowest,
                           borderRadius: BorderRadius.circular(12),
                         ),
                         child: Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Text('ELO',
+                            const Text('RATING',
                                 style: TextStyle(
-                                    fontSize: 12, color: Color(0xFF6B7280))),
+                                    fontSize: 12,
+                                    color: AppColors.onSurfaceVariant)),
                             const SizedBox(width: 10),
                             Text(
                               '$_rating',
                               style: const TextStyle(
                                 fontSize: 18,
-                                color: Color(0xFF0E46A7),
+                                color: AppColors.primary,
                                 fontWeight: FontWeight.w800,
                               ),
                             ),
-                            const SizedBox(width: 10),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFFDE6DE),
-                                borderRadius: BorderRadius.circular(6),
-                              ),
-                              child: const Text(
-                                '↗+12',
-                                style: TextStyle(
-                                  color: Color(0xFFB42318),
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w600,
+                            if (_ratingDelta != 0) ...[
+                              const SizedBox(width: 10),
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 8, vertical: 4),
+                                decoration: BoxDecoration(
+                                  color: _ratingDelta > 0
+                                      ? AppColors.tertiaryContainer.withValues(alpha: 0.2)
+                                      : AppColors.error.withValues(alpha: 0.2),
+                                  borderRadius: BorderRadius.circular(6),
+                                ),
+                                child: Text(
+                                  '${_ratingDelta > 0 ? '+' : ''}$_ratingDelta',
+                                  style: TextStyle(
+                                    color: _ratingDelta > 0
+                                        ? AppColors.tertiaryContainer
+                                        : AppColors.error,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w600,
+                                  ),
                                 ),
                               ),
-                            ),
+                            ],
                           ],
                         ),
                       ),
@@ -262,7 +279,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       value: _bestTimeSeconds > 0
                           ? _formatDuration(_bestTimeSeconds)
                           : '--:--',
-                      subtitle: 'Expert',
                     ),
                     const SizedBox(height: 24),
                     Row(
@@ -352,21 +368,19 @@ class _ProfileScreenState extends State<ProfileScreen> {
 class _ProfileCard extends StatelessWidget {
   final String title;
   final String value;
-  final String? subtitle;
   final bool highlighted;
 
   const _ProfileCard({
     required this.title,
     required this.value,
-    this.subtitle,
     this.highlighted = false,
   });
 
   @override
   Widget build(BuildContext context) {
-    final bg = highlighted ? const Color(0xFF0E53BE) : Colors.white;
-    final fg = highlighted ? Colors.white : const Color(0xFF10151E);
-    final sub = highlighted ? Colors.white70 : const Color(0xFF6B7280);
+    final bg = highlighted ? AppColors.primary : AppColors.surfaceContainerLowest;
+    final fg = highlighted ? Colors.white : AppColors.onSurface;
+    final sub = highlighted ? Colors.white70 : AppColors.onSurfaceVariant;
 
     return Container(
       height: 120,
@@ -388,27 +402,14 @@ class _ProfileCard extends StatelessWidget {
             ),
           ),
           const Spacer(),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.end,
-            children: [
-              Text(
-                value,
-                style: TextStyle(
-                  fontSize: 42,
-                  color: fg,
-                  fontWeight: FontWeight.w800,
-                  letterSpacing: -1,
-                ),
-              ),
-              if (subtitle != null)
-                Padding(
-                  padding: const EdgeInsets.only(left: 6, bottom: 6),
-                  child: Text(
-                    subtitle!,
-                    style: TextStyle(color: sub, fontSize: 14),
-                  ),
-                ),
-            ],
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 42,
+              color: fg,
+              fontWeight: FontWeight.w800,
+              letterSpacing: -1,
+            ),
           ),
         ],
       ),
@@ -427,7 +428,7 @@ class _AchievementTile extends StatelessWidget {
     return Container(
       width: 132,
       decoration: BoxDecoration(
-        color: const Color(0xFFE5E7EB),
+        color: AppColors.surfaceContainerLow,
         borderRadius: BorderRadius.circular(22),
       ),
       child: Column(
@@ -437,17 +438,17 @@ class _AchievementTile extends StatelessWidget {
             width: 48,
             height: 48,
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: AppColors.surfaceContainerLowest,
               borderRadius: BorderRadius.circular(12),
             ),
-            child: Icon(icon, color: const Color(0xFF0E53BE)),
+            child: Icon(icon, color: AppColors.primary),
           ),
           const SizedBox(height: 12),
           Text(
             title,
             textAlign: TextAlign.center,
             style: const TextStyle(
-              color: Color(0xFF10151E),
+              color: AppColors.onSurface,
               fontSize: 13,
               fontWeight: FontWeight.w600,
             ),
@@ -478,7 +479,7 @@ class _HistoryCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppColors.surfaceContainerLowest,
         borderRadius: BorderRadius.circular(16),
       ),
       child: Row(
@@ -487,11 +488,13 @@ class _HistoryCard extends StatelessWidget {
             width: 42,
             height: 42,
             decoration: BoxDecoration(
-              color: won ? const Color(0xFFFDE6DE) : const Color(0xFFDDE5FF),
+              color: won
+                  ? AppColors.tertiaryContainer.withValues(alpha: 0.15)
+                  : AppColors.primary.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(10),
             ),
             child: Icon(Icons.grid_4x4,
-                color: won ? const Color(0xFF9B1C1C) : const Color(0xFF0E46A7)),
+                color: won ? AppColors.tertiaryContainer : AppColors.primary),
           ),
           const SizedBox(width: 12),
           Expanded(
@@ -501,13 +504,14 @@ class _HistoryCard extends StatelessWidget {
                 Text(
                   title,
                   style: const TextStyle(
-                      fontSize: 18, fontWeight: FontWeight.w600),
+                      fontSize: 18, fontWeight: FontWeight.w600,
+                      color: AppColors.onSurface),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   subtitle,
-                  style:
-                      const TextStyle(fontSize: 13, color: Color(0xFF6B7280)),
+                  style: const TextStyle(
+                      fontSize: 13, color: AppColors.onSurfaceVariant),
                 ),
               ],
             ),
@@ -518,7 +522,7 @@ class _HistoryCard extends StatelessWidget {
               Text(
                 duration,
                 style: const TextStyle(
-                  color: Color(0xFF0D3897),
+                  color: AppColors.primary,
                   fontSize: 22,
                   fontWeight: FontWeight.w700,
                 ),
@@ -527,8 +531,7 @@ class _HistoryCard extends StatelessWidget {
                 status,
                 style: TextStyle(
                   fontSize: 12,
-                  color:
-                      won ? const Color(0xFFB42318) : const Color(0xFF6B7280),
+                  color: won ? AppColors.tertiaryContainer : AppColors.outline,
                   fontWeight: FontWeight.w600,
                 ),
               ),

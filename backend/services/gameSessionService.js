@@ -50,7 +50,7 @@ function createSession(player1Id, player2Id, options = {}) {
   userSessions.set(player1Id, gameId);
   userSessions.set(player2Id, gameId);
 
-  return { gameId, puzzle, status: 'active' };
+  return { gameId, puzzle, solution, status: 'active' };
 }
 
 function getSession(gameId) {

@@ -12,21 +12,26 @@ const {
   updateMatchSessionProgress,
   finishMatchSession,
   storeMatchResultController,
+  dailyChallenge,
 } = require('../controllers/gameController');
+const { requireAuth } = require('../middleware/auth');
+const { puzzleLimiter, matchWriteLimiter } = require('../middleware/rateLimiters');
 
 const router = express.Router();
 
-router.get('/game/new', newGame);
-router.get('/puzzle', getPuzzle);
+router.get('/game/new', puzzleLimiter, newGame);
+router.get('/puzzle', puzzleLimiter, getPuzzle);
+router.get('/daily', puzzleLimiter, dailyChallenge);
 router.post('/game/validate', validateMove);
 router.post('/validate', validateBoard);
 router.post('/game/check', checkGame);
 router.post('/game/hint', getHint);
 router.post('/game/update', updateGameProgress);
-router.post('/sessions', createMatchSession);
+// State-changing / result-recording routes require a valid token when auth is on.
+router.post('/sessions', requireAuth, matchWriteLimiter, createMatchSession);
 router.get('/sessions/:gameId', getMatchSession);
-router.patch('/sessions/:gameId/progress', updateMatchSessionProgress);
-router.post('/sessions/:gameId/finish', finishMatchSession);
-router.post('/games', storeMatchResultController);
+router.patch('/sessions/:gameId/progress', requireAuth, matchWriteLimiter, updateMatchSessionProgress);
+router.post('/sessions/:gameId/finish', requireAuth, matchWriteLimiter, finishMatchSession);
+router.post('/games', requireAuth, matchWriteLimiter, storeMatchResultController);
 
 module.exports = router;

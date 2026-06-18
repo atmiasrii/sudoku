@@ -21,6 +21,7 @@ const {
   logDisconnect,
   logQueue,
 } = require('../services/logService');
+const { socketAuth } = require('../middleware/auth');
 
 const activeUsers = new Set();
 const matchingUsers = new Set();
@@ -29,7 +30,24 @@ const queueFallbackTimers = new Map();
 const botProgressIntervals = new Map();
 const botFinishTimers = new Map();
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 10000;
-const BOT_MATCH_WAIT_MS = 5000;
+const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 5000;
+
+// Lightweight per-socket sliding-window rate limiter. Prevents a single
+// connection from flooding join_queue / progress_update. State lives on the
+// socket so it is GC'd on disconnect (no shared map to leak).
+function rateLimit(socket, key, maxEvents, windowMs) {
+  const now = Date.now();
+  if (!socket.data.rate) socket.data.rate = {};
+  const bucket = socket.data.rate[key] || [];
+  const recent = bucket.filter((ts) => now - ts < windowMs);
+  if (recent.length >= maxEvents) {
+    socket.data.rate[key] = recent;
+    return false;
+  }
+  recent.push(now);
+  socket.data.rate[key] = recent;
+  return true;
+}
 
 function isBotId(userId) {
   return typeof userId === 'string' && userId.startsWith('bot_');
@@ -70,7 +88,16 @@ function emitBotProgress(io, gameId, botId) {
   }
 
   const current = session.progress[botId] || { filledCells: 0, mistakes: 0 };
-  const nextFilled = Math.min(80, current.filledCells + Math.floor(Math.random() * 4));
+  // Cap the bot at the puzzle's real blank count so the opponent meter scales
+  // 0 -> 100% against the same denominator the human uses (a hardcoded 80
+  // overshot the blanks and pinned the opponent near 100% from the start).
+  const emptyCells = Array.isArray(session.puzzle)
+    ? session.puzzle.reduce(
+        (sum, row) => sum + row.filter((value) => value === 0).length,
+        0,
+      )
+    : 80;
+  const nextFilled = Math.min(emptyCells, current.filledCells + Math.floor(Math.random() * 4));
   const nextMistakes = Math.min(2, current.mistakes + (Math.random() < 0.2 ? 1 : 0));
   const result = updateProgress(gameId, botId, {
     filledCells: nextFilled,
@@ -160,7 +187,7 @@ function scheduleBotFallback(io, queuedPlayer) {
         },
       };
 
-      const { gameId, puzzle } = createSession(botId, playerId, {
+      const { gameId, puzzle, solution } = createSession(botId, playerId, {
         playersMeta,
         isBotMatch: true,
       });
@@ -173,6 +200,7 @@ function scheduleBotFallback(io, queuedPlayer) {
       liveSocket.emit('match_found', {
         gameId,
         puzzle,
+        solution,
         playersMeta,
       });
 
@@ -200,7 +228,7 @@ function isProgressValueInRange(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max;
 }
 
-async function persistMatchResult(sessionResult) {
+async function persistMatchResult(sessionResult, ratingUpdate = null) {
   if (!sessionResult || !Array.isArray(sessionResult.players) || sessionResult.players.length !== 2) {
     return null;
   }
@@ -211,14 +239,21 @@ async function persistMatchResult(sessionResult) {
 
   const [player1Id, player2Id] = sessionResult.players;
   const winnerMistakes = sessionResult.progress?.[sessionResult.winnerId]?.mistakes || 0;
+  const winnerId = sessionResult.winnerId;
+
+  let ratingDelta = 0;
+  if (ratingUpdate && ratingUpdate.deltas && winnerId) {
+    ratingDelta = ratingUpdate.deltas[winnerId] || 0;
+  }
 
   return storeMatchResult({
     seed: sessionResult.seed,
     player1_id: player1Id,
     player2_id: player2Id,
-    winner_id: sessionResult.winnerId,
+    winner_id: winnerId,
     duration: sessionResult.duration || 0,
     mistakes: winnerMistakes,
+    rating_delta: ratingDelta,
   });
 }
 
@@ -248,6 +283,9 @@ async function calculateAndPersistRatings(sessionResult) {
   const newRating1 = calculateElo(oldRating1, oldRating2, player1Score);
   const newRating2 = calculateElo(oldRating2, oldRating1, player2Score);
 
+  const delta1 = newRating1 - oldRating1;
+  const delta2 = newRating2 - oldRating2;
+
   await Promise.all([
     updateUserRating(player1Id, newRating1),
     updateUserRating(player2Id, newRating2),
@@ -261,6 +299,10 @@ async function calculateAndPersistRatings(sessionResult) {
     ratings: {
       [player1Id]: newRating1,
       [player2Id]: newRating2,
+    },
+    deltas: {
+      [player1Id]: delta1,
+      [player2Id]: delta2,
     },
     previousRatings: {
       [player1Id]: oldRating1,
@@ -284,7 +326,8 @@ async function finalizeMatch(io, gameId, sessionResult, reason) {
   }
 
   try {
-    persistedMatch = await persistMatchResult(sessionResult);
+    ratingUpdate = await calculateAndPersistRatings(sessionResult);
+    persistedMatch = await persistMatchResult(sessionResult, ratingUpdate);
   } catch (error) {
     console.error('Failed to persist match result:', error.message);
   }
@@ -317,12 +360,6 @@ async function finalizeMatch(io, gameId, sessionResult, reason) {
     } catch (error) {
       console.error('Failed to write suspicious solve log:', error.message);
     }
-  }
-
-  try {
-    ratingUpdate = await calculateAndPersistRatings(sessionResult);
-  } catch (error) {
-    console.error('Failed to persist rating update:', error.message);
   }
 
   io.to(gameId).emit('game_end', {
@@ -367,9 +404,17 @@ function toPublicSession(gameId, session, forUserId = null) {
 }
 
 function initializeSocketServer(io) {
+  // Verifies the Supabase JWT on the handshake when SUPABASE_JWT_SECRET is set;
+  // no-op otherwise (keeps local testing working without a secret).
+  io.use(socketAuth);
+
   io.on('connection', (socket) => {
     socket.on('join_queue', async (payload = {}) => {
-      const userId = typeof payload.userId === 'string' ? payload.userId : null;
+      // Max 5 queue attempts / 10s per socket.
+      if (!rateLimit(socket, 'join_queue', 5, 10000)) return;
+      // When auth is on, trust the verified token id, never the payload.
+      const userId = socket.data.authUserId
+        || (typeof payload.userId === 'string' ? payload.userId : null);
       if (!userId) return;
 
       if (activeUsers.has(userId)) {
@@ -463,7 +508,7 @@ function initializeSocketServer(io) {
           },
         };
 
-        const { gameId, puzzle } = createSession(player1Id, player2Id, { playersMeta });
+        const { gameId, puzzle, solution } = createSession(player1Id, player2Id, { playersMeta });
 
         opponentSocket.data.userId = player1Id;
         opponentSocket.data.gameId = gameId;
@@ -478,6 +523,7 @@ function initializeSocketServer(io) {
         io.to(gameId).emit('match_found', {
           gameId,
           puzzle,
+          solution,
           playersMeta,
         });
 
@@ -510,9 +556,17 @@ function initializeSocketServer(io) {
 
     socket.on('progress_update', async (payload = {}) => {
       const gameId = payload.gameId || socket.data.gameId;
-      const playerId = payload.userId || socket.data.userId;
+      const playerId = socket.data.authUserId
+        || payload.userId
+        || socket.data.userId;
 
       if (!gameId || !playerId) return;
+
+      // Throttle progress spam to 25/s, but never drop a completion claim
+      // (that path is server-validated against the solution anyway).
+      if (payload.completed !== true && !rateLimit(socket, 'progress', 25, 1000)) {
+        return;
+      }
 
       const data = {};
 

@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../app_colors.dart';
+import '../widgets/user_avatar.dart';
+
 class VictoryScreen extends StatelessWidget {
   final bool won;
   final bool multiplayer;
   final bool allowClose;
   final String playerName;
+  final String? playerUserId;
   final int playerRating;
   final int ratingDelta;
   final String timeText;
@@ -19,6 +23,7 @@ class VictoryScreen extends StatelessWidget {
     required this.multiplayer,
     this.allowClose = false,
     required this.playerName,
+    this.playerUserId,
     required this.playerRating,
     required this.ratingDelta,
     required this.timeText,
@@ -45,7 +50,7 @@ class VictoryScreen extends StatelessWidget {
       child: ClipRRect(
         borderRadius: BorderRadius.circular(26),
         child: Container(
-          color: const Color(0xFFF1F3F7),
+          color: AppColors.surface,
           constraints: const BoxConstraints(maxWidth: 480, maxHeight: 760),
           child: SingleChildScrollView(
             padding: const EdgeInsets.fromLTRB(18, 14, 18, 18),
@@ -54,20 +59,15 @@ class VictoryScreen extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Container(
-                      width: 42,
-                      height: 42,
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(12),
-                        color: const Color(0xFF0A0D14),
-                      ),
-                      child: const Icon(Icons.person, color: Colors.white),
+                    UserAvatar(
+                      userId: playerUserId ?? 'player',
+                      size: 42,
                     ),
                     const SizedBox(width: 12),
                     Text(
                       '$playerRating',
                       style: const TextStyle(
-                        color: Color(0xFF0E46A7),
+                        color: AppColors.primary,
                         fontSize: 40,
                         fontWeight: FontWeight.w800,
                         letterSpacing: -1.0,
@@ -92,7 +92,7 @@ class VictoryScreen extends StatelessWidget {
                     padding:
                         const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                     decoration: BoxDecoration(
-                      color: const Color(0xFF0E46A7),
+                      color: AppColors.primary,
                       borderRadius: BorderRadius.circular(999),
                     ),
                     child: Text(
@@ -110,7 +110,7 @@ class VictoryScreen extends StatelessWidget {
                   child: Text(
                     won ? 'VICTORY' : 'DEFEAT',
                     style: const TextStyle(
-                      color: Color(0xFF0E46A7),
+                      color: AppColors.primary,
                       fontSize: 56,
                       fontWeight: FontWeight.w900,
                       letterSpacing: -2.2,
@@ -124,7 +124,7 @@ class VictoryScreen extends StatelessWidget {
                         ? 'Masterfully solved in record time.'
                         : 'Tough match. Review and come back stronger.',
                     style: const TextStyle(
-                      color: Color(0xFF1F2937),
+                      color: AppColors.onSurface,
                       fontSize: 17,
                     ),
                   ),
@@ -133,7 +133,7 @@ class VictoryScreen extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.fromLTRB(20, 20, 20, 18),
                   decoration: BoxDecoration(
-                    color: Colors.white,
+                    color: AppColors.surfaceContainerLowest,
                     borderRadius: BorderRadius.circular(16),
                   ),
                   child: Column(
@@ -144,7 +144,7 @@ class VictoryScreen extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 20,
                           letterSpacing: 1.0,
-                          color: Color(0xFF1F2937),
+                          color: AppColors.onSurface,
                         ),
                       ),
                       const SizedBox(height: 8),
@@ -156,15 +156,15 @@ class VictoryScreen extends StatelessWidget {
                             style: const TextStyle(
                               fontSize: 56,
                               fontWeight: FontWeight.w900,
-                              color: Color(0xFF10151E),
+                              color: AppColors.onSurface,
                               letterSpacing: -2.5,
                             ),
                           ),
                           const Spacer(),
                           Text(
                             '${ratingDelta >= 0 ? '+' : ''}$ratingDelta',
-                            style: const TextStyle(
-                              color: Color(0xFFB42318),
+                            style: TextStyle(
+                              color: ratingDelta >= 0 ? AppColors.tertiaryContainer : AppColors.error,
                               fontSize: 28,
                               fontWeight: FontWeight.w700,
                             ),
@@ -178,7 +178,7 @@ class VictoryScreen extends StatelessWidget {
                             'Next Rank: ${_nextRankLabel(playerRating)}',
                             style: const TextStyle(
                               fontSize: 14,
-                              color: Color(0xFF1F2937),
+                              color: AppColors.onSurface,
                               fontWeight: FontWeight.w600,
                             ),
                           ),
@@ -186,7 +186,7 @@ class VictoryScreen extends StatelessWidget {
                           Text(
                             '$pointsInTier/100 Points',
                             style: const TextStyle(
-                              color: Color(0xFF6B7280),
+                              color: AppColors.onSurfaceVariant,
                               fontSize: 13,
                             ),
                           ),
@@ -198,9 +198,9 @@ class VictoryScreen extends StatelessWidget {
                         child: LinearProgressIndicator(
                           minHeight: 8,
                           value: pointsInTier / 100,
-                          backgroundColor: const Color(0xFFD1D5DB),
+                          backgroundColor: AppColors.surfaceContainerHigh,
                           valueColor: const AlwaysStoppedAnimation<Color>(
-                              Color(0xFF0E46A7)),
+                              AppColors.primary),
                         ),
                       ),
                     ],
@@ -229,7 +229,12 @@ class VictoryScreen extends StatelessWidget {
                     ),
                     const SizedBox(width: 12),
                     Expanded(
-                      child: _StatCard(label: 'DIFFICULTY', value: difficulty),
+                      child: _StatCard(
+                        label: 'DIFFICULTY',
+                        value: difficulty.isEmpty
+                            ? difficulty
+                            : '${difficulty[0].toUpperCase()}${difficulty.substring(1).toLowerCase()}',
+                      ),
                     ),
                   ],
                 ),
@@ -241,7 +246,7 @@ class VictoryScreen extends StatelessWidget {
                         height: 56,
                         child: ElevatedButton(
                           style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF0E53BE),
+                            backgroundColor: AppColors.primary,
                             foregroundColor: Colors.white,
                             elevation: 2,
                             shape: RoundedRectangleBorder(
@@ -266,13 +271,13 @@ class VictoryScreen extends StatelessWidget {
                         child: OutlinedButton(
                           style: OutlinedButton.styleFrom(
                             side: const BorderSide(
-                              color: Color(0xFFB8BFCE),
+                              color: AppColors.outlineVariant,
                               width: 2,
                             ),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(14),
                             ),
-                            foregroundColor: const Color(0xFF10151E),
+                            foregroundColor: AppColors.onSurface,
                           ),
                           onPressed: () =>
                               Navigator.of(context).pop('find_new'),
@@ -309,7 +314,7 @@ class _StatCard extends StatelessWidget {
       height: 128,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: const Color(0xFFECEFF4),
+        color: AppColors.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(14),
       ),
       child: Column(
@@ -318,18 +323,23 @@ class _StatCard extends StatelessWidget {
           Text(
             label,
             style: const TextStyle(
-              color: Color(0xFF1F2937),
+              color: AppColors.onSurfaceVariant,
               fontSize: 13,
               letterSpacing: 0.8,
             ),
           ),
           const Spacer(),
-          Text(
-            value,
-            style: const TextStyle(
-              color: Color(0xFF10151E),
-              fontSize: 34,
-              fontWeight: FontWeight.w700,
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              value,
+              maxLines: 1,
+              style: const TextStyle(
+                color: AppColors.onSurface,
+                fontSize: 34,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],

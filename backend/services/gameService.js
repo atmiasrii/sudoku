@@ -26,17 +26,19 @@ async function setUserStats(userId, stats) {
 }
 
 async function updatePlayerStats(winnerId, loserId) {
-  const winnerStats = await getUserStats(winnerId);
-  await setUserStats(winnerId, {
-    wins: (winnerStats?.wins || 0) + 1,
-    games_played: (winnerStats?.games_played || 0) + 1,
-  });
+  // Atomic in Postgres (see sql/rpc_functions.sql). Read-then-write here would
+  // lose increments when two matches finish for the same user concurrently.
+  const [winnerResult, loserResult] = await Promise.all([
+    supabase.rpc('increment_user_stats', { p_user_id: winnerId, p_win: 1, p_loss: 0 }),
+    supabase.rpc('increment_user_stats', { p_user_id: loserId, p_win: 0, p_loss: 1 }),
+  ]);
 
-  const loserStats = await getUserStats(loserId);
-  await setUserStats(loserId, {
-    losses: (loserStats?.losses || 0) + 1,
-    games_played: (loserStats?.games_played || 0) + 1,
-  });
+  if (winnerResult.error) {
+    throw new Error(`Failed to update winner stats: ${winnerResult.error.message}`);
+  }
+  if (loserResult.error) {
+    throw new Error(`Failed to update loser stats: ${loserResult.error.message}`);
+  }
 }
 
 async function storeMatchResult(matchData) {
@@ -47,6 +49,7 @@ async function storeMatchResult(matchData) {
     winner_id: winnerId,
     duration = 0,
     mistakes = 0,
+    rating_delta = 0,
   } = matchData;
 
   const { data, error } = await supabase
@@ -58,6 +61,7 @@ async function storeMatchResult(matchData) {
       winner_id: winnerId,
       duration,
       mistakes,
+      rating_delta,
     })
     .select('*')
     .single();

@@ -1,7 +1,14 @@
 const supabase = require('../config/supabase');
 
-async function createUserProfile(userId, username) {
-  const { data, error } = await supabase
+// Public, non-PII columns only. Never select('*') on a service-role client:
+// it would leak any sensitive column (e.g. email) to anyone hitting the API.
+const PUBLIC_COLUMNS = 'id, username, rating, games_played, wins, losses';
+
+// Postgres unique-violation SQLSTATE.
+const UNIQUE_VIOLATION = '23505';
+
+async function insertUserProfile(userId, username) {
+  return supabase
     .from('users')
     .insert({
       id: userId,
@@ -11,8 +18,31 @@ async function createUserProfile(userId, username) {
       wins: 0,
       losses: 0,
     })
-    .select('*')
+    .select(PUBLIC_COLUMNS)
     .single();
+}
+
+// Creates the profile row. On a username collision: when [allowSuffix] is set
+// (the login auto-derive path, which must never hard-fail) retry once with a
+// random numeric suffix; otherwise surface a 'username_taken' error so explicit
+// signup can reject it.
+async function createUserProfile(userId, username, { allowSuffix = false } = {}) {
+  let { data, error } = await insertUserProfile(userId, username);
+
+  if (error && error.code === UNIQUE_VIOLATION) {
+    // The id is the primary key, so a 23505 can be either "profile exists"
+    // (same id) or "username taken". Let the id-collision case bubble up as a
+    // duplicate; treat the rest as a username clash.
+    const isUsernameClash = !/\bid\b/i.test(error.message || '');
+    if (isUsernameClash) {
+      if (allowSuffix) {
+        const suffixed = `${username}_${Math.floor(1000 + Math.random() * 9000)}`;
+        ({ data, error } = await insertUserProfile(userId, suffixed));
+      } else {
+        throw new Error('username_taken');
+      }
+    }
+  }
 
   if (error) {
     throw new Error(`Failed to create user profile: ${error.message}`);
@@ -21,10 +51,27 @@ async function createUserProfile(userId, username) {
   return data;
 }
 
+// True when no existing user (case-insensitive) already has this username.
+// `_` and `%` are LIKE wildcards, so escape them for an exact ilike match.
+async function isUsernameAvailable(username) {
+  const pattern = username.replace(/([\\%_])/g, '\\$1');
+  const { data, error } = await supabase
+    .from('users')
+    .select('id')
+    .ilike('username', pattern)
+    .limit(1);
+
+  if (error) {
+    throw new Error(`Failed to check username: ${error.message}`);
+  }
+
+  return data.length === 0;
+}
+
 async function getUserById(userId) {
   const { data, error } = await supabase
     .from('users')
-    .select('*')
+    .select(PUBLIC_COLUMNS)
     .eq('id', userId)
     .maybeSingle();
 
@@ -69,7 +116,7 @@ async function getLeaderboard(limit = 10) {
 
   const { data, error } = await supabase
     .from('users')
-    .select('*')
+    .select(PUBLIC_COLUMNS)
     .order('rating', { ascending: false })
     .limit(Math.max(1, Math.min(100, normalizedLimit)));
 
@@ -82,6 +129,7 @@ async function getLeaderboard(limit = 10) {
 
 module.exports = {
   createUserProfile,
+  isUsernameAvailable,
   getUserById,
   getUserRating,
   updateUserRating,

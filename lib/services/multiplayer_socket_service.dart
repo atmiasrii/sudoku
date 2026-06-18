@@ -2,15 +2,17 @@ import 'dart:async';
 
 import 'package:socket_io_client/socket_io_client.dart' as io;
 
+import '../config/api_config.dart';
+import 'auth_service.dart';
+
 class MultiplayerSocketService {
   MultiplayerSocketService._();
 
   static final MultiplayerSocketService instance = MultiplayerSocketService._();
 
-  static const String _socketUrl = 'http://192.168.0.103:4000';
+  static final String _socketUrl = ApiConfig.socketUrl;
 
   io.Socket? _socket;
-  String? _currentUserId;
 
   final StreamController<Map<String, dynamic>> _matchFoundController =
       StreamController<Map<String, dynamic>>.broadcast();
@@ -59,25 +61,49 @@ class MultiplayerSocketService {
   bool get isConnected => _socket?.connected == true;
 
   Future<void> connect(String userId) async {
-    _currentUserId = userId;
-
     if (_socket != null && _socket!.connected) {
       return;
     }
 
-    _socket = io.io(
-      _socketUrl,
-      io.OptionBuilder()
-          .setTransports(['websocket'])
-          .disableAutoConnect()
-          .enableReconnection()
-          .setReconnectionAttempts(20)
-          .setReconnectionDelay(500)
-          .build(),
-    );
+    // A leftover socket from a previous match (disposed manager, not connected)
+    // can fail to reconnect — start clean.
+    if (_socket != null) {
+      _socket!.dispose();
+      _socket = null;
+    }
+
+    // Send the Supabase access token so the backend can verify identity when
+    // SUPABASE_JWT_SECRET is configured. Harmless when auth is disabled.
+    final token = AuthService.instance.accessToken;
+    final optionBuilder = io.OptionBuilder()
+        .setTransports(['websocket'])
+        .disableAutoConnect()
+        .enableReconnection()
+        .setReconnectionAttempts(20)
+        .setReconnectionDelay(500);
+    if (token != null) {
+      optionBuilder.setAuth({'token': token});
+    }
+
+    _socket = io.io(_socketUrl, optionBuilder.build());
+
+    // Completer wired BEFORE connect() so we can't miss the connect event. The
+    // broadcast connectionStream doesn't buffer, so on a warm/instant reconnect
+    // (e.g. tapping PLAY right after a match) a stream-based wait would drop the
+    // event and time out — this avoids that race.
+    final connectCompleter = Completer<void>();
 
     _socket!.onConnect((_) {
       _connectedController.add(true);
+      if (!connectCompleter.isCompleted) connectCompleter.complete();
+    });
+
+    _socket!.onConnectError((err) {
+      if (!connectCompleter.isCompleted) {
+        connectCompleter.completeError(
+          StateError('Socket connect error: $err'),
+        );
+      }
     });
 
     _socket!.onDisconnect((_) {
@@ -126,33 +152,17 @@ class MultiplayerSocketService {
 
     _socket!.connect();
 
-    await _waitForConnect();
-  }
-
-  Future<void> _waitForConnect() async {
-    if (_socket?.connected == true) return;
-
-    final completer = Completer<void>();
-    late StreamSubscription<bool> sub;
-    sub = connectionStream.listen((connected) {
-      if (connected && !completer.isCompleted) {
-        completer.complete();
-      }
-    });
-
-    await completer.future.timeout(const Duration(seconds: 8));
-    await sub.cancel();
+    if (_socket!.connected) return;
+    await connectCompleter.future.timeout(const Duration(seconds: 8));
   }
 
   void joinQueue(String userId) {
-    _currentUserId = userId;
     _socket?.emit('join_queue', {
       'userId': userId,
     });
   }
 
   void reconnectGame(String userId, String gameId) {
-    _currentUserId = userId;
     _socket?.emit('reconnect_game', {
       'userId': userId,
       'gameId': gameId,

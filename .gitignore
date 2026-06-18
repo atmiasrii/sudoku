@@ -1,3 +1,7 @@
+# Node dependencies
+backend/node_modules/
+tool/iconfwd/node_modules/
+
 # Miscellaneous
 *.class
 *.log

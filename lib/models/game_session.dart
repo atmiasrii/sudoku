@@ -43,7 +43,7 @@ class GameSession {
 
     return GameSession(
       puzzle: toBoard(json['puzzle']),
-      solution: null,
+      solution: json['solution'] == null ? null : toBoard(json['solution']),
       playersMeta: json['playersMeta'] is Map
           ? Map<String, dynamic>.from(json['playersMeta'] as Map)
           : null,
