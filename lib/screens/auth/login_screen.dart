@@ -7,9 +7,7 @@ import 'auth_widgets.dart';
 import 'signup_screen.dart';
 
 class LoginScreen extends StatefulWidget {
-  final VoidCallback? onSkip;
-
-  const LoginScreen({super.key, this.onSkip});
+  const LoginScreen({super.key});
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -108,20 +106,6 @@ class _LoginScreenState extends State<LoginScreen> {
                             ),
                           ),
                 ),
-                if (widget.onSkip != null) ...[
-                  const SizedBox(height: 14),
-                  TextButton(
-                    onPressed: _loading ? null : widget.onSkip,
-                    child: const Text(
-                      'Skip for now',
-                      style: TextStyle(
-                        color: AppColors.onSurfaceVariant,
-                        fontSize: 13,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                ],
               ],
             ),
           ),

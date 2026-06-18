@@ -99,6 +99,8 @@ class MultiplayerSocketService {
     });
 
     _socket!.onConnectError((err) {
+      // ignore: avoid_print
+      print('[socket] connect_error -> $err');
       if (!connectCompleter.isCompleted) {
         connectCompleter.completeError(
           StateError('Socket connect error: $err'),

@@ -1,5 +1,3 @@
-import 'dart:math';
-
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:posthog_flutter/posthog_flutter.dart';
@@ -156,9 +154,9 @@ class _SudokuAppState extends State<SudokuApp> {
 /// changes (sign in / sign out / token refresh) and shows either the login
 /// screen or the main app keyed to the authenticated user's id.
 ///
-/// "Skip for now" bypasses the gate with a locally-generated guest id —
-/// no Supabase session, so it only works while the backend's
-/// SUPABASE_JWT_SECRET enforcement is left off (local/dev testing).
+/// A real Supabase account is REQUIRED — the backend enforces
+/// SUPABASE_JWT_SECRET, so every REST call and socket needs a valid token.
+/// There is no guest bypass.
 class _AuthGate extends StatefulWidget {
   final Widget Function(String userId) buildMainScaffold;
 
@@ -169,35 +167,21 @@ class _AuthGate extends StatefulWidget {
 }
 
 class _AuthGateState extends State<_AuthGate> {
-  String? _guestUserId;
   String? _identifiedId;
-
-  void _skip() {
-    setState(() => _guestUserId = _generateGuestId());
-    Analytics.capture('guest_started');
-  }
-
-  String _generateGuestId() {
-    final rand = Random();
-    String hex(int n) =>
-        List.generate(n, (_) => rand.nextInt(16).toRadixString(16)).join();
-    return '${hex(8)}-${hex(4)}-4${hex(3)}-${(8 + rand.nextInt(4)).toRadixString(16)}${hex(3)}-${hex(12)}';
-  }
 
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<AuthState>(
       stream: AuthService.instance.onAuthStateChange,
       builder: (context, snapshot) {
-        final userId = AuthService.instance.currentUserId ?? _guestUserId;
+        final userId = AuthService.instance.currentUserId;
         if (userId == null) {
-          return LoginScreen(onSkip: _skip);
+          return const LoginScreen();
         }
         // Tie analytics events to this user once per identity change.
         if (userId != _identifiedId) {
           _identifiedId = userId;
-          final isGuest = AuthService.instance.currentUserId == null;
-          Analytics.identify(userId, isGuest: isGuest);
+          Analytics.identify(userId);
         }
         return widget.buildMainScaffold(userId);
       },

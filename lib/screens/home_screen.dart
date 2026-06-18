@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../app_colors.dart';
+import '../config/api_config.dart';
 import '../models/game_session.dart';
 import '../services/active_game_store.dart';
 import '../services/analytics_service.dart';
@@ -312,8 +313,8 @@ class _HomeScreenState extends State<HomeScreen> {
       _socketService.disconnect();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Could not connect to matchmaking server on port 7777'),
+        SnackBar(
+          content: Text('Could not connect to matchmaking server at ${ApiConfig.socketUrl}'),
         ),
       );
     } finally {
