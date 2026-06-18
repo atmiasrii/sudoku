@@ -16,12 +16,12 @@ class ApiConfig {
 
   static const String _host = String.fromEnvironment(
     'BACKEND_HOST',
-    defaultValue: '192.168.0.40',
+    defaultValue: '209.97.149.75',
   );
 
   static const int _port = int.fromEnvironment(
     'BACKEND_PORT',
-    defaultValue: 7777,
+    defaultValue: 4001,
   );
 
   static const String _scheme = String.fromEnvironment(

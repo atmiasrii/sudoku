@@ -23,5 +23,6 @@ jobs:
             git pull origin main
             cd backend
             npm ci --omit=dev
-            pm2 restart backend
+            pm2 restart backend || pm2 start server.js --name backend -i 1
             pm2 save
+            echo "Deploy complete: $(date -u)"
