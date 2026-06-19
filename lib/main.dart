@@ -8,7 +8,7 @@ import 'app_colors.dart';
 import 'config/analytics_config.dart';
 import 'config/supabase_config.dart';
 import 'services/analytics_service.dart';
-import 'screens/auth/login_screen.dart';
+import 'screens/auth/auth_screen.dart';
 import 'screens/game_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/profile_screen.dart';
@@ -17,6 +17,7 @@ import 'screens/splash_screen.dart';
 import 'services/active_game_store.dart';
 import 'services/auth_service.dart';
 import 'widgets/app_settings_sheet.dart';
+import 'widgets/page_transitions.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -176,7 +177,7 @@ class _AuthGateState extends State<_AuthGate> {
       builder: (context, snapshot) {
         final userId = AuthService.instance.currentUserId;
         if (userId == null) {
-          return const LoginScreen();
+          return const AuthScreen();
         }
         // Tie analytics events to this user once per identity change.
         if (userId != _identifiedId) {
@@ -265,8 +266,8 @@ class _MainShellState extends State<MainShell> {
     }
 
     await Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => GameScreen(
+      fadeThroughRoute(
+        GameScreen(
           restoreFrom: snapshot,
           highlightMistakes: widget.highlightMistakes,
           timerEnabled: widget.timerEnabled,

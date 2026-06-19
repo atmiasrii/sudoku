@@ -6,7 +6,7 @@ const {
   updateProgress,
   finishSession,
 } = require('../services/gameSessionService');
-const { storeMatchResult } = require('../services/gameService');
+const { storeMatchResult, updateSoloStats } = require('../services/gameService');
 const { getUserById, updateUserRating } = require('../services/userService');
 const {
   addToQueue,
@@ -228,18 +228,62 @@ function isProgressValueInRange(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max;
 }
 
+// Pure, no DB: decide the rating change instantly from in-memory state. The ELO
+// base is the rating captured in playersMeta at queue-join (fresh enough — every
+// match requires a re-queue, which re-reads the DB rating). Works for human-vs-
+// human and human-vs-bot alike (the bot's rating lives in playersMeta too).
+function computeRatingUpdate(sessionResult) {
+  if (!sessionResult || !Array.isArray(sessionResult.players) || sessionResult.players.length !== 2) {
+    return null;
+  }
+
+  const [player1Id, player2Id] = sessionResult.players;
+  const meta = sessionResult.playersMeta || {};
+  const oldRating1 = Number(meta[player1Id]?.rating ?? 1200);
+  const oldRating2 = Number(meta[player2Id]?.rating ?? 1200);
+  const winnerId = sessionResult.winnerId;
+
+  const player1Score = winnerId === player1Id ? 1 : 0;
+  const player2Score = winnerId === player2Id ? 1 : 0;
+
+  const newRating1 = calculateElo(oldRating1, oldRating2, player1Score);
+  const newRating2 = calculateElo(oldRating2, oldRating1, player2Score);
+
+  return {
+    player1Id,
+    player2Id,
+    winnerId,
+    loserId: sessionResult.loserId,
+    ratings: { [player1Id]: newRating1, [player2Id]: newRating2 },
+    deltas: {
+      [player1Id]: newRating1 - oldRating1,
+      [player2Id]: newRating2 - oldRating2,
+    },
+    previousRatings: { [player1Id]: oldRating1, [player2Id]: oldRating2 },
+  };
+}
+
+// Writes a finished match to the DB. For bot matches the opponent has no `users`
+// row (non-uuid id) so we update only the human's win/loss and skip the `games`
+// insert; human-vs-human writes the full match row + both stats.
 async function persistMatchResult(sessionResult, ratingUpdate = null) {
   if (!sessionResult || !Array.isArray(sessionResult.players) || sessionResult.players.length !== 2) {
     return null;
   }
 
-  if (sessionResult.isBotMatch || sessionResult.players.some((playerId) => isBotId(playerId))) {
+  const [player1Id, player2Id] = sessionResult.players;
+  const winnerId = sessionResult.winnerId;
+  const isBotMatch = sessionResult.isBotMatch
+    || isBotId(player1Id) || isBotId(player2Id);
+
+  if (isBotMatch) {
+    const humanId = sessionResult.players.find((id) => !isBotId(id));
+    if (!humanId || !winnerId) return null;
+    await updateSoloStats(humanId, winnerId === humanId);
     return null;
   }
 
-  const [player1Id, player2Id] = sessionResult.players;
-  const winnerMistakes = sessionResult.progress?.[sessionResult.winnerId]?.mistakes || 0;
-  const winnerId = sessionResult.winnerId;
+  const winnerMistakes = sessionResult.progress?.[winnerId]?.mistakes || 0;
 
   let ratingDelta = 0;
   if (ratingUpdate && ratingUpdate.deltas && winnerId) {
@@ -257,64 +301,67 @@ async function persistMatchResult(sessionResult, ratingUpdate = null) {
   });
 }
 
-async function calculateAndPersistRatings(sessionResult) {
-  if (!sessionResult || !Array.isArray(sessionResult.players) || sessionResult.players.length !== 2) {
-    return null;
-  }
-
-  if (sessionResult.isBotMatch || sessionResult.players.some((playerId) => isBotId(playerId))) {
-    return null;
-  }
+// All DB work, off the player's critical path. Errors are logged, never thrown.
+async function persistMatchAsync(sessionResult, ratingUpdate, reason, gameId) {
+  if (!sessionResult || !Array.isArray(sessionResult.players)) return;
 
   const [player1Id, player2Id] = sessionResult.players;
-  const winnerId = sessionResult.winnerId;
+  const isBotMatch = isBotId(player1Id) || isBotId(player2Id);
 
-  const [player1, player2] = await Promise.all([
-    getUserById(player1Id),
-    getUserById(player2Id),
-  ]);
+  // 1. Persist new ratings for non-bot players.
+  if (ratingUpdate) {
+    const writes = [];
+    for (const pid of sessionResult.players) {
+      if (isBotId(pid)) continue;
+      const newRating = ratingUpdate.ratings[pid];
+      if (typeof newRating === 'number') writes.push(updateUserRating(pid, newRating));
+    }
+    try {
+      await Promise.all(writes);
+    } catch (error) {
+      console.error('Failed to persist ratings:', error.message);
+    }
+  }
 
-  const oldRating1 = Number(player1?.rating ?? 1200);
-  const oldRating2 = Number(player2?.rating ?? 1200);
+  // 2. Match record + win/loss stats.
+  try {
+    await persistMatchResult(sessionResult, ratingUpdate);
+  } catch (error) {
+    console.error('Failed to persist match result:', error.message);
+  }
 
-  const player1Score = winnerId === player1Id ? 1 : 0;
-  const player2Score = winnerId === player2Id ? 1 : 0;
+  // 3. Analytics logs — skip bot ids (the logs table keys on uuid).
+  if (!isBotMatch) {
+    try {
+      await logMatch({
+        game_id: gameId,
+        player1_id: player1Id || null,
+        player2_id: player2Id || null,
+        winner_id: sessionResult.winnerId || null,
+        loser_id: sessionResult.loserId || null,
+        duration: sessionResult.duration || 0,
+        reason,
+      });
+    } catch (error) {
+      console.error('Failed to write match log:', error.message);
+    }
 
-  const newRating1 = calculateElo(oldRating1, oldRating2, player1Score);
-  const newRating2 = calculateElo(oldRating2, oldRating1, player2Score);
-
-  const delta1 = newRating1 - oldRating1;
-  const delta2 = newRating2 - oldRating2;
-
-  await Promise.all([
-    updateUserRating(player1Id, newRating1),
-    updateUserRating(player2Id, newRating2),
-  ]);
-
-  return {
-    player1Id,
-    player2Id,
-    winnerId,
-    loserId: sessionResult.loserId,
-    ratings: {
-      [player1Id]: newRating1,
-      [player2Id]: newRating2,
-    },
-    deltas: {
-      [player1Id]: delta1,
-      [player2Id]: delta2,
-    },
-    previousRatings: {
-      [player1Id]: oldRating1,
-      [player2Id]: oldRating2,
-    },
-  };
+    if (sessionResult.suspiciousSolve && !isBotId(sessionResult.winnerId)) {
+      try {
+        await logSuspicious({
+          user_id: sessionResult.winnerId || null,
+          game_id: gameId,
+          reason: 'too_fast',
+          details: { duration: sessionResult.duration || 0 },
+        });
+      } catch (error) {
+        console.error('Failed to write suspicious solve log:', error.message);
+      }
+    }
+  }
 }
 
 async function finalizeMatch(io, gameId, sessionResult, reason) {
-  let persistedMatch = null;
-  let ratingUpdate = null;
-
   clearBotSimulation(gameId);
 
   for (const playerId of sessionResult.players || []) {
@@ -325,48 +372,16 @@ async function finalizeMatch(io, gameId, sessionResult, reason) {
     }
   }
 
-  try {
-    ratingUpdate = await calculateAndPersistRatings(sessionResult);
-    persistedMatch = await persistMatchResult(sessionResult, ratingUpdate);
-  } catch (error) {
-    console.error('Failed to persist match result:', error.message);
-  }
-
-  try {
-    const [player1Id, player2Id] = sessionResult.players || [];
-    await logMatch({
-      game_id: gameId,
-      player1_id: player1Id || null,
-      player2_id: player2Id || null,
-      winner_id: sessionResult.winnerId || null,
-      loser_id: sessionResult.loserId || null,
-      duration: sessionResult.duration || 0,
-      reason,
-    });
-  } catch (error) {
-    console.error('Failed to write match log:', error.message);
-  }
-
-  if (sessionResult.suspiciousSolve) {
-    try {
-      await logSuspicious({
-        user_id: sessionResult.winnerId || null,
-        game_id: gameId,
-        reason: 'too_fast',
-        details: {
-          duration: sessionResult.duration || 0,
-        },
-      });
-    } catch (error) {
-      console.error('Failed to write suspicious solve log:', error.message);
-    }
-  }
+  // Decide + broadcast instantly: the board was already validated server-side,
+  // so the winner is known. No DB on the critical path → result + ELO land in
+  // one round trip (<200ms), never blocked by Supabase latency.
+  const ratingUpdate = computeRatingUpdate(sessionResult);
 
   io.to(gameId).emit('game_end', {
     gameId,
     ...sessionResult,
     reason,
-    persistedMatch,
+    persistedMatch: null,
     ratingUpdate,
   });
 
@@ -375,6 +390,9 @@ async function finalizeMatch(io, gameId, sessionResult, reason) {
   }
 
   await cleanupRoom(io, gameId);
+
+  // Persist in the background — players already have their result.
+  void persistMatchAsync(sessionResult, ratingUpdate, reason, gameId);
 }
 
 async function cleanupRoom(io, gameId) {

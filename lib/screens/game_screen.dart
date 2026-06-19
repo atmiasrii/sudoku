@@ -53,6 +53,7 @@ class _GameScreenState extends State<GameScreen>
   final List<StreamSubscription> _subs = [];
 
   Timer? _timer;
+  Timer? _finishTimeout;
   int _elapsedSeconds = 0;
   int _mistakes = 0;
   bool _gameEnded = false;
@@ -285,6 +286,7 @@ class _GameScreenState extends State<GameScreen>
     ActiveGameStore.clear();
     WidgetsBinding.instance.removeObserver(this);
     _timer?.cancel();
+    _finishTimeout?.cancel();
     for (final s in _subs) {
       s.cancel();
     }
@@ -314,6 +316,7 @@ class _GameScreenState extends State<GameScreen>
       final reason = payload['reason']?.toString() ?? 'completed';
       final ratingUpdate = payload['ratingUpdate'];
 
+      _finishTimeout?.cancel();
       setState(() {
         _gameEnded = true;
         _awaitingFinish = false;
@@ -334,6 +337,14 @@ class _GameScreenState extends State<GameScreen>
             if (_opponentId != null && ratings[_opponentId] is num) {
               _opponentRating = (ratings[_opponentId] as num).toInt();
             }
+          }
+          // Capture the delta from game_end itself so the result screen shows
+          // the correct +/- immediately (it now ships with game_end instead of
+          // arriving later via a separate rating_update).
+          final deltas = ratingUpdate['deltas'];
+          final me = widget.currentUserId;
+          if (deltas is Map && me != null && deltas[me] is num) {
+            _lastRatingDelta = (deltas[me] as num).toInt();
           }
         }
       });
@@ -397,6 +408,7 @@ class _GameScreenState extends State<GameScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text(message)),
       );
+      _finishTimeout?.cancel();
       setState(() {
         _awaitingFinish = false;
       });
@@ -993,7 +1005,7 @@ class _GameScreenState extends State<GameScreen>
         : !_isValidPlacement(row, col, number);
 
     setState(() {
-      _moveHistory.add(_Move(row, col, previous, false));
+      _moveHistory.add(_Move(row, col, previous, isWrong));
       _board.setCell(row, col, number);
       if (isWrong) {
         _mistakes += 1;
@@ -1019,6 +1031,18 @@ class _GameScreenState extends State<GameScreen>
           _awaitingFinish = true;
         });
         _reportProgress(completed: true);
+        // Defensive: the server now broadcasts the result instantly, but if a
+        // network stall swallows game_end, don't trap the player on the
+        // "verifying" spinner forever.
+        _finishTimeout?.cancel();
+        _finishTimeout = Timer(const Duration(seconds: 5), () {
+          if (!mounted || _gameEnded) return;
+          setState(() => _awaitingFinish = false);
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content: Text('Still confirming your win — tap the last cell again.')),
+          );
+        });
         return;
       }
 
@@ -1031,15 +1055,21 @@ class _GameScreenState extends State<GameScreen>
   }
 
   void _onUndo() {
-    if (_moveHistory.isEmpty || _gameEnded) return;
+    if (_moveHistory.isEmpty || _gameEnded || _awaitingFinish) return;
     final last = _moveHistory.removeLast();
     setState(() {
       _board.setCell(last.row, last.col, last.prevValue);
       _selectedRow = last.row;
       _selectedCol = last.col;
+      // Undoing a wrong entry should give the mistake back, not leave the count
+      // permanently inflated.
+      if (last.wasInvalid) {
+        _mistakes = (_mistakes - 1).clamp(0, 99);
+      }
     });
 
     _reportProgress();
+    _persistSnapshot();
   }
 
   void _onErase() {
@@ -1249,8 +1279,29 @@ class _GameScreenState extends State<GameScreen>
               ),
               if (_awaitingFinish)
                 const Padding(
-                  padding: EdgeInsets.only(top: 4),
-                  child: Text('Waiting for server verification...'),
+                  padding: EdgeInsets.only(top: 6),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppColors.primary,
+                        ),
+                      ),
+                      SizedBox(width: 8),
+                      Text(
+                        'Confirming your win…',
+                        style: TextStyle(
+                          color: AppColors.onSurfaceVariant,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               const SizedBox(height: 10),
               Expanded(

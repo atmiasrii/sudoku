@@ -12,6 +12,7 @@ import '../services/active_game_store.dart';
 import '../services/analytics_service.dart';
 import '../services/game_api_service.dart';
 import '../services/multiplayer_socket_service.dart';
+import '../widgets/page_transitions.dart';
 import '../widgets/screen_header.dart';
 import '../widgets/user_avatar.dart';
 import 'game_screen.dart';
@@ -167,8 +168,8 @@ class _HomeScreenState extends State<HomeScreen> {
     if (active != null) {
       if (!mounted) return;
       await Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => GameScreen(
+        fadeThroughRoute(
+          GameScreen(
             restoreFrom: active,
             highlightMistakes: widget.highlightMistakes,
             timerEnabled: widget.timerEnabled,
@@ -200,8 +201,8 @@ class _HomeScreenState extends State<HomeScreen> {
         Navigator.of(context, rootNavigator: true).pop();
 
         final result = await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => GameScreen(
+          fadeThroughRoute(
+            GameScreen(
               initialSession: session,
               highlightMistakes: widget.highlightMistakes,
               timerEnabled: widget.timerEnabled,
@@ -259,8 +260,8 @@ class _HomeScreenState extends State<HomeScreen> {
         final session = GameSession.fromMatchFound(payload);
         if (!mounted) return;
         final result = await Navigator.of(context).push(
-          MaterialPageRoute(
-            builder: (_) => GameScreen(
+          fadeThroughRoute(
+            GameScreen(
               initialSession: session,
               highlightMistakes: widget.highlightMistakes,
               timerEnabled: widget.timerEnabled,
@@ -380,8 +381,8 @@ class _HomeScreenState extends State<HomeScreen> {
     Analytics.capture('daily_opened',
         props: {'day_number': (daily['dayNumber'] as num?)?.toInt()});
     Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => GameScreen(
+      fadeThroughRoute(
+        GameScreen(
           initialSession: GameSession.fromJson(daily),
           highlightMistakes: widget.highlightMistakes,
           timerEnabled: widget.timerEnabled,

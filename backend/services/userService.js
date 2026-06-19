@@ -31,16 +31,21 @@ async function createUserProfile(userId, username, { allowSuffix = false } = {})
 
   if (error && error.code === UNIQUE_VIOLATION) {
     // The id is the primary key, so a 23505 can be either "profile exists"
-    // (same id) or "username taken". Let the id-collision case bubble up as a
-    // duplicate; treat the rest as a username clash.
-    const isUsernameClash = !/\bid\b/i.test(error.message || '');
-    if (isUsernameClash) {
-      if (allowSuffix) {
-        const suffixed = `${username}_${Math.floor(1000 + Math.random() * 9000)}`;
-        ({ data, error } = await insertUserProfile(userId, suffixed));
-      } else {
-        throw new Error('username_taken');
-      }
+    // (same id) or "username taken".
+    const isIdCollision = /\bid\b/i.test(error.message || '');
+    if (isIdCollision) {
+      // This authed user already has a profile — that's success, not an error.
+      // Return the existing row so signup/login resolve cleanly (no scary
+      // "duplicate key" log, no confusing client error).
+      return getUserById(userId);
+    }
+
+    // Otherwise it's a username clash.
+    if (allowSuffix) {
+      const suffixed = `${username}_${Math.floor(1000 + Math.random() * 9000)}`;
+      ({ data, error } = await insertUserProfile(userId, suffixed));
+    } else {
+      throw new Error('username_taken');
     }
   }
 
