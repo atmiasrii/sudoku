@@ -86,6 +86,7 @@ async function run() {
         const env = await createSocketTestEnvironment({
           users: [
             { id: 'solo1', rating: 1330 },
+            { id: 'bot-fixture-1', username: 'TestBot', rating: 1300, is_bot: true },
           ],
         });
 
@@ -104,8 +105,8 @@ async function run() {
           assert.strictEqual(playerIds.length, 2);
           assert.ok(playerIds.includes('solo1'));
 
-          const botId = playerIds.find((id) => id.startsWith('bot_'));
-          assert.ok(botId, 'expected bot id in playersMeta');
+          const botId = playerIds.find((id) => id !== 'solo1');
+          assert.strictEqual(botId, 'bot-fixture-1');
 
           const liveSession = env.sessionService.getSession(payload.gameId);
           assert.ok(liveSession);

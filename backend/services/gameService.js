@@ -41,21 +41,6 @@ async function updatePlayerStats(winnerId, loserId) {
   }
 }
 
-// Increment a single player's win/loss. Used for bot matches, where the
-// opponent has no `users` row (a non-uuid bot id) so the two-sided
-// updatePlayerStats can't run.
-async function updateSoloStats(userId, won) {
-  const { error } = await supabase.rpc('increment_user_stats', {
-    p_user_id: userId,
-    p_win: won ? 1 : 0,
-    p_loss: won ? 0 : 1,
-  });
-
-  if (error) {
-    throw new Error(`Failed to update solo stats: ${error.message}`);
-  }
-}
-
 async function storeMatchResult(matchData) {
   const {
     seed,
@@ -110,6 +95,5 @@ async function getPlayerMatchHistory(userId) {
 module.exports = {
   storeMatchResult,
   updatePlayerStats,
-  updateSoloStats,
   getPlayerMatchHistory,
 };

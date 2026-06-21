@@ -27,6 +27,7 @@ function createInMemoryDb(seedUsers) {
       games_played: Number(user.games_played ?? 0),
       wins: Number(user.wins ?? 0),
       losses: Number(user.losses ?? 0),
+      is_bot: user.is_bot === true,
     });
   }
 
@@ -43,6 +44,7 @@ function createInMemoryDb(seedUsers) {
         games_played: 0,
         wins: 0,
         losses: 0,
+        is_bot: false,
       };
 
       const next = {
@@ -52,6 +54,30 @@ function createInMemoryDb(seedUsers) {
 
       users.set(userId, next);
       return clone(next);
+    },
+    async incrementUserRating(userId, delta) {
+      const existing = users.get(userId) || {
+        id: userId,
+        username: userId,
+        rating: 1200,
+        games_played: 0,
+        wins: 0,
+        losses: 0,
+        is_bot: false,
+      };
+
+      const next = {
+        ...existing,
+        rating: Number(existing.rating) + Number(delta),
+      };
+
+      users.set(userId, next);
+      return clone(next);
+    },
+    async getBotPool() {
+      return [...users.values()]
+        .filter((user) => user.is_bot === true)
+        .map(clone);
     },
     async getLeaderboard(limit = 10) {
       return [...users.values()]

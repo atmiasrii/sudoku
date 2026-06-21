@@ -6,8 +6,8 @@ const {
   updateProgress,
   finishSession,
 } = require('../services/gameSessionService');
-const { storeMatchResult, updateSoloStats } = require('../services/gameService');
-const { getUserById, updateUserRating } = require('../services/userService');
+const { storeMatchResult } = require('../services/gameService');
+const { getUserById, incrementUserRating, getBotPool } = require('../services/userService');
 const {
   addToQueue,
   findMatch,
@@ -22,6 +22,7 @@ const {
   logQueue,
 } = require('../services/logService');
 const { socketAuth } = require('../middleware/auth');
+const { withTimeout } = require('../utils/withTimeout');
 
 const activeUsers = new Set();
 const matchingUsers = new Set();
@@ -47,10 +48,6 @@ function rateLimit(socket, key, maxEvents, windowMs) {
   recent.push(now);
   socket.data.rate[key] = recent;
   return true;
-}
-
-function isBotId(userId) {
-  return typeof userId === 'string' && userId.startsWith('bot_');
 }
 
 function clearQueueFallbackTimer(userId) {
@@ -149,10 +146,44 @@ function startBotSimulation(io, gameId, botId) {
   botFinishTimers.set(gameId, finishTimer);
 }
 
+// How far (in rating points) a bot opponent may sit from the human before
+// it's no longer considered a "fair" pick. Unlike matchmakingService's
+// wait-time bands (which widen the longer a *human* waits), the bot pool is
+// static and never "waits", so a flat window is simpler and correct here.
+const BOT_RATING_BAND = 150;
+
+function pickBotFromPool(pool, targetRating) {
+  if (!Array.isArray(pool) || pool.length === 0) return null;
+
+  const ranked = pool
+    .map((bot) => ({ bot, diff: Math.abs(bot.rating - targetRating) }))
+    .sort((a, b) => a.diff - b.diff);
+
+  const within = ranked.filter((entry) => entry.diff <= BOT_RATING_BAND);
+  const candidates = within.length > 0 ? within : ranked.slice(0, 1);
+  return candidates[Math.floor(Math.random() * candidates.length)].bot;
+}
+
+// Up to two attempts at fetching the live bot pool before giving up for this
+// tick — a transient Supabase blip shouldn't be treated the same as the pool
+// being genuinely unavailable.
+async function pickBotForFallback(targetRating) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const pool = await getBotPool();
+      const picked = pickBotFromPool(pool, targetRating);
+      if (picked) return picked;
+    } catch (error) {
+      console.error(`Bot pool lookup failed (attempt ${attempt + 1}):`, error.message);
+    }
+  }
+  return null;
+}
+
 function scheduleBotFallback(io, queuedPlayer) {
   clearQueueFallbackTimer(queuedPlayer.userId);
 
-  const timer = setTimeout(() => {
+  const timer = setTimeout(async () => {
     queueFallbackTimers.delete(queuedPlayer.userId);
 
     const liveQueuedPlayer = getQueuedPlayer(queuedPlayer.userId);
@@ -166,19 +197,32 @@ function scheduleBotFallback(io, queuedPlayer) {
       return;
     }
 
+    // Claim the player and pull them off the queue synchronously (before the
+    // bot-pool lookup below ever awaits) so a real opponent's findMatch can't
+    // double-book them while we're mid-lookup.
     matchingUsers.add(liveQueuedPlayer.userId);
+    removeFromQueue(liveQueuedPlayer.userId);
 
     try {
-      removeFromQueue(liveQueuedPlayer.userId);
+      const bot = await pickBotForFallback(liveQueuedPlayer.rating);
+      if (!bot) {
+        console.error(`No bot available for fallback match (player ${liveQueuedPlayer.userId})`);
+        // Supabase is unreachable right now — put the player back in queue
+        // and retry shortly rather than stranding them with no path to a
+        // match.
+        addToQueue(liveQueuedPlayer);
+        scheduleBotFallback(io, liveQueuedPlayer);
+        return;
+      }
 
-      const botId = `bot_${Math.random().toString(36).slice(2, 10)}`;
+      const botId = bot.id;
       const playerId = liveQueuedPlayer.userId;
 
       const playersMeta = {
         [botId]: {
           userId: botId,
-          username: 'Sudoku Bot',
-          rating: Math.max(900, Math.min(2200, liveQueuedPlayer.rating + 25)),
+          username: bot.username,
+          rating: bot.rating,
         },
         [playerId]: {
           userId: playerId,
@@ -263,9 +307,9 @@ function computeRatingUpdate(sessionResult) {
   };
 }
 
-// Writes a finished match to the DB. For bot matches the opponent has no `users`
-// row (non-uuid id) so we update only the human's win/loss and skip the `games`
-// insert; human-vs-human writes the full match row + both stats.
+// Writes a finished match to the DB. Bot opponents are real `users` rows now,
+// so a bot match is written exactly like a human-vs-human one — same `games`
+// row, same two-sided stat increments.
 async function persistMatchResult(sessionResult, ratingUpdate = null) {
   if (!sessionResult || !Array.isArray(sessionResult.players) || sessionResult.players.length !== 2) {
     return null;
@@ -273,15 +317,6 @@ async function persistMatchResult(sessionResult, ratingUpdate = null) {
 
   const [player1Id, player2Id] = sessionResult.players;
   const winnerId = sessionResult.winnerId;
-  const isBotMatch = sessionResult.isBotMatch
-    || isBotId(player1Id) || isBotId(player2Id);
-
-  if (isBotMatch) {
-    const humanId = sessionResult.players.find((id) => !isBotId(id));
-    if (!humanId || !winnerId) return null;
-    await updateSoloStats(humanId, winnerId === humanId);
-    return null;
-  }
 
   const winnerMistakes = sessionResult.progress?.[winnerId]?.mistakes || 0;
 
@@ -306,15 +341,16 @@ async function persistMatchAsync(sessionResult, ratingUpdate, reason, gameId) {
   if (!sessionResult || !Array.isArray(sessionResult.players)) return;
 
   const [player1Id, player2Id] = sessionResult.players;
-  const isBotMatch = isBotId(player1Id) || isBotId(player2Id);
+  const isBotMatch = sessionResult.isBotMatch === true;
 
-  // 1. Persist new ratings for non-bot players.
+  // 1. Persist new ratings. Additive (delta) RPC, not a plain SET — a bot
+  // row can be in several concurrent matches at once, so this must be atomic
+  // for bots; it's an equally-safe no-op-equivalent for humans.
   if (ratingUpdate) {
     const writes = [];
     for (const pid of sessionResult.players) {
-      if (isBotId(pid)) continue;
-      const newRating = ratingUpdate.ratings[pid];
-      if (typeof newRating === 'number') writes.push(updateUserRating(pid, newRating));
+      const delta = ratingUpdate.deltas[pid];
+      if (typeof delta === 'number') writes.push(incrementUserRating(pid, delta));
     }
     try {
       await Promise.all(writes);
@@ -330,7 +366,9 @@ async function persistMatchAsync(sessionResult, ratingUpdate, reason, gameId) {
     console.error('Failed to persist match result:', error.message);
   }
 
-  // 3. Analytics logs — skip bot ids (the logs table keys on uuid).
+  // 3. Analytics logs — bot matches are synthetic, keep them out of
+  // match-quality/anti-cheat analytics entirely (intentional, not a type
+  // constraint — bot ids are real uuids now too).
   if (!isBotMatch) {
     try {
       await logMatch({
@@ -346,7 +384,7 @@ async function persistMatchAsync(sessionResult, ratingUpdate, reason, gameId) {
       console.error('Failed to write match log:', error.message);
     }
 
-    if (sessionResult.suspiciousSolve && !isBotId(sessionResult.winnerId)) {
+    if (sessionResult.suspiciousSolve) {
       try {
         await logSuspicious({
           user_id: sessionResult.winnerId || null,
@@ -449,8 +487,13 @@ function initializeSocketServer(io) {
       let rating = 1200;
       let username = userId;
       try {
-        // Always fetch the latest rating from DB at queue-join time.
-        const user = await getUserById(userId);
+        // Always fetch the latest rating from DB at queue-join time. Bounded
+        // so a slow/cold Supabase call can never stall matchmaking itself —
+        // a timeout just means this one queue-join uses the default rating.
+        const user = await withTimeout(getUserById(userId), 2500, null);
+        if (user === null) {
+          console.error(`getUserById timed out or failed for ${userId}, queueing at default rating`);
+        }
         rating = Number(user?.rating ?? 1200);
         username = user?.username || userId;
       } catch (error) {

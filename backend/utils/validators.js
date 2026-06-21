@@ -8,10 +8,8 @@ function isUuid(value) {
   return typeof value === 'string' && UUID_RE.test(value);
 }
 
-// Accept real Supabase user UUIDs and our internal bot ids ("bot_xxxx").
+// All user ids — human or bot — are real Supabase-issued UUIDs.
 function isUserId(value) {
-  if (typeof value !== 'string') return false;
-  if (value.startsWith('bot_')) return value.length <= 40;
   return isUuid(value);
 }
 

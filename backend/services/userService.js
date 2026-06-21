@@ -116,6 +116,20 @@ async function updateUserRating(userId, newRating) {
   return data;
 }
 
+// Atomic delta update via RPC (not a plain SET rating = X): a bot user row
+// can be in several concurrent matches at once, so a read-then-write from the
+// app would race and silently drop a delta when two finish close together.
+async function incrementUserRating(userId, delta) {
+  const { error } = await supabase.rpc('increment_user_rating', {
+    p_user_id: userId,
+    p_delta: delta,
+  });
+
+  if (error) {
+    throw new Error(`Failed to update user rating: ${error.message}`);
+  }
+}
+
 async function getLeaderboard(limit = 10) {
   const normalizedLimit = Number.isInteger(Number(limit)) ? Number(limit) : 10;
 
@@ -132,11 +146,30 @@ async function getLeaderboard(limit = 10) {
   return data;
 }
 
+// The synthetic opponent pool for bot matches (see websocket/socketServer.js
+// scheduleBotFallback). Queried fresh each time rather than cached, since a
+// bot's rating moves after every match it plays and a stale snapshot would
+// pick a worse-matched opponent.
+async function getBotPool() {
+  const { data, error } = await supabase
+    .from('users')
+    .select('id, username, rating')
+    .eq('is_bot', true);
+
+  if (error) {
+    throw new Error(`Failed to fetch bot pool: ${error.message}`);
+  }
+
+  return data;
+}
+
 module.exports = {
   createUserProfile,
   isUsernameAvailable,
   getUserById,
   getUserRating,
   updateUserRating,
+  incrementUserRating,
+  getBotPool,
   getLeaderboard,
 };
