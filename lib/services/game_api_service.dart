@@ -221,33 +221,41 @@ class GameApiService {
 
   static Future<Map<String, dynamic>?> getUserProfile(String userId) async {
     final uri = Uri.parse('$_baseUrl/users/$userId');
-    final response = await http.get(uri);
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 7));
 
-    if (response.statusCode != 200) {
+      if (response.statusCode != 200) {
+        return null;
+      }
+
+      return jsonDecode(response.body) as Map<String, dynamic>;
+    } catch (_) {
       return null;
     }
-
-    return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   static Future<List<Map<String, dynamic>>> getUserMatchHistory(
       String userId) async {
     final uri = Uri.parse('$_baseUrl/users/$userId/matches');
-    final response = await http.get(uri);
+    try {
+      final response = await http.get(uri).timeout(const Duration(seconds: 7));
 
-    if (response.statusCode != 200) {
+      if (response.statusCode != 200) {
+        return <Map<String, dynamic>>[];
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final rawMatches = data['matches'];
+      if (rawMatches is! List) {
+        return <Map<String, dynamic>>[];
+      }
+
+      return rawMatches
+          .whereType<Map>()
+          .map((item) => Map<String, dynamic>.from(item))
+          .toList();
+    } catch (_) {
       return <Map<String, dynamic>>[];
     }
-
-    final data = jsonDecode(response.body) as Map<String, dynamic>;
-    final rawMatches = data['matches'];
-    if (rawMatches is! List) {
-      return <Map<String, dynamic>>[];
-    }
-
-    return rawMatches
-        .whereType<Map>()
-        .map((item) => Map<String, dynamic>.from(item))
-        .toList();
   }
 }

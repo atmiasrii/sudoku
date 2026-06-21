@@ -699,6 +699,34 @@ function initializeSocketServer(io) {
       });
     });
 
+    // Explicit "I surrender" — finalize immediately instead of waiting out the
+    // DISCONNECT_GRACE_MS reconnect window, since intent here is unambiguous
+    // (unlike a plain disconnect, which could be an accidental drop).
+    socket.on('surrender', ({ gameId } = {}) => {
+      const userId = socket.data.userId;
+      const resolvedGameId = gameId || socket.data.gameId;
+      if (!userId || !resolvedGameId) return;
+
+      const liveSession = getSession(resolvedGameId);
+      if (!liveSession) return;
+
+      const opponentId = liveSession.players.find((id) => id !== userId);
+      if (!opponentId) return;
+
+      const previousTimer = disconnectTimers.get(userId);
+      if (previousTimer) {
+        clearTimeout(previousTimer);
+        disconnectTimers.delete(userId);
+      }
+
+      const finishedResult = finishSession(resolvedGameId, opponentId);
+      if (!finishedResult) return;
+
+      finalizeMatch(io, resolvedGameId, finishedResult, 'surrendered').catch((error) => {
+        console.error('Failed to finalize surrendered match:', error.message);
+      });
+    });
+
     socket.on('disconnect', () => {
       const { userId, gameId } = socket.data;
 

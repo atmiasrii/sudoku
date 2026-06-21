@@ -189,6 +189,10 @@ class MultiplayerSocketService {
     });
   }
 
+  void surrender(String gameId) {
+    _socket?.emit('surrender', {'gameId': gameId});
+  }
+
   void disconnect() {
     _socket?.disconnect();
     _socket?.dispose();

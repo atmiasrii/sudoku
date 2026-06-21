@@ -909,13 +909,17 @@ class _GameScreenState extends State<GameScreen>
 
     if (_isMultiplayer) {
       if (Navigator.of(context).canPop()) {
-        Navigator.of(context).pop();
+        Navigator.of(context).pop(
+          {'rating': _playerRating, 'ratingDelta': _lastRatingDelta},
+        );
       }
       return;
     }
 
     if (Navigator.of(context).canPop()) {
-      Navigator.of(context).pop();
+      Navigator.of(context).pop(
+        {'rating': _playerRating, 'ratingDelta': _lastRatingDelta},
+      );
     }
   }
 
@@ -1101,11 +1105,29 @@ class _GameScreenState extends State<GameScreen>
       'mode': _isMultiplayer ? 'ranked' : _difficulty,
       'elapsed_seconds': _elapsedSeconds,
     });
-    if (Navigator.of(context).canPop()) {
-      // Leaving the screen disposes the socket, so the opponent is awarded the
-      // match by forfeit on the server side.
-      Navigator.of(context).pop();
+
+    if (!_isMultiplayer || _gameId == null) {
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+      return;
     }
+
+    // Tell the server immediately so it finalizes (and updates ratings) right
+    // away instead of waiting out the disconnect-reconnect grace window. The
+    // existing gameEndStream listener picks up the resulting game_end and
+    // shows the result screen with the new rating already applied.
+    setState(() => _awaitingFinish = true);
+    _socketService.surrender(_gameId!);
+
+    _finishTimeout?.cancel();
+    _finishTimeout = Timer(const Duration(seconds: 5), () {
+      if (!mounted || _gameEnded) return;
+      setState(() => _awaitingFinish = false);
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+      }
+    });
   }
 
   void _showGameMenu() {
@@ -1181,7 +1203,7 @@ class _GameScreenState extends State<GameScreen>
                         ),
                         Switch(
                           value: _hideRatings,
-                          activeThumbColor: Colors.white,
+                          activeColor: Colors.white,
                           activeTrackColor: AppColors.primary,
                           onChanged: (v) {
                             setLocal(() {});

@@ -12,6 +12,7 @@ import '../services/active_game_store.dart';
 import '../services/analytics_service.dart';
 import '../services/game_api_service.dart';
 import '../services/multiplayer_socket_service.dart';
+import '../services/profile_cache_store.dart';
 import '../widgets/page_transitions.dart';
 import '../widgets/screen_header.dart';
 import '../widgets/user_avatar.dart';
@@ -64,7 +65,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _loadProfile();
+    _initProfile();
     _subscribeToRatingUpdates();
     _loadDaily();
   }
@@ -84,6 +85,27 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // ─── Profile Loading ───────────────────────────────────────────────────────
 
+  /// Paints from cache instantly if we have one (no spinner), then always
+  /// reconciles with the server in the background. Only shows the blocking
+  /// spinner when there is truly no cached data yet (first-ever run).
+  Future<void> _initProfile() async {
+    final cached = await ProfileCacheStore.load(widget.userId);
+    if (!mounted) return;
+
+    if (cached != null) {
+      setState(() {
+        _rating = cached.rating;
+        _ratingDelta = cached.ratingDelta;
+        _winStreak = cached.winStreak;
+        _matchHistory = cached.matchHistory;
+        _profileLoading = false;
+      });
+      _loadProfile(silent: true);
+    } else {
+      _loadProfile();
+    }
+  }
+
   /// Reloads rating + recent history. [silent] skips the loading spinner so a
   /// background Realtime refresh doesn't flash the UI.
   Future<void> _loadProfile({bool silent = false}) async {
@@ -91,10 +113,26 @@ class _HomeScreenState extends State<HomeScreen> {
     if (!silent) setState(() => _profileLoading = true);
 
     final userId = widget.userId;
-    final profile = await GameApiService.getUserProfile(userId);
-    final history = await GameApiService.getUserMatchHistory(userId);
+    Map<String, dynamic>? profile;
+    List<Map<String, dynamic>> history = const [];
+    try {
+      final results = await Future.wait([
+        GameApiService.getUserProfile(userId),
+        GameApiService.getUserMatchHistory(userId),
+      ]);
+      profile = results[0] as Map<String, dynamic>?;
+      history = results[1] as List<Map<String, dynamic>>;
+    } catch (_) {
+      // Network failure/timeout: fall through and clear the spinner below,
+      // leaving whatever is already in state (cache or previous fetch).
+    }
 
     if (!mounted) return;
+
+    if (profile == null && history.isEmpty) {
+      setState(() => _profileLoading = false);
+      return;
+    }
 
     int delta = 0;
     int streak = 0;
@@ -109,13 +147,43 @@ class _HomeScreenState extends State<HomeScreen> {
       }
     }
 
+    final rating = (profile?['rating'] as num?)?.toInt() ?? _rating;
+    final trimmedHistory = history.take(5).toList();
+
     setState(() {
-      _rating = (profile?['rating'] as num?)?.toInt() ?? 1200;
+      _rating = rating;
       _ratingDelta = delta;
       _winStreak = streak;
-      _matchHistory = history.take(5).toList();
+      _matchHistory = trimmedHistory;
       _profileLoading = false;
     });
+
+    await ProfileCacheStore.save(
+      userId: userId,
+      rating: rating,
+      ratingDelta: delta,
+      winStreak: streak,
+      matchHistory: trimmedHistory,
+    );
+  }
+
+  /// Applies the rating/delta GameScreen already computed (passed back via
+  /// its pop result) so the home rating updates with zero network latency
+  /// and no spinner, then reconciles silently in the background to pick up
+  /// match history / win streak / authoritative server state.
+  void _applyMatchResultAndReconcile(Object? result) {
+    if (!mounted) return;
+    if (result is Map) {
+      final rating = (result['rating'] as num?)?.toInt();
+      final ratingDelta = (result['ratingDelta'] as num?)?.toInt();
+      if (rating != null) {
+        setState(() {
+          _rating = rating;
+          _ratingDelta = ratingDelta ?? _ratingDelta;
+        });
+      }
+    }
+    _loadProfile(silent: true);
   }
 
   /// The `games` row stores a single `rating_delta` (the winner's gain). With a
@@ -167,7 +235,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final active = await ActiveGameStore.load(widget.userId);
     if (active != null) {
       if (!mounted) return;
-      await Navigator.of(context).push(
+      final result = await Navigator.of(context).push(
         fadeThroughRoute(
           GameScreen(
             restoreFrom: active,
@@ -178,7 +246,7 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
         ),
       );
-      if (mounted) _loadProfile();
+      if (mounted) _applyMatchResultAndReconcile(result);
       return;
     }
 
@@ -214,8 +282,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
         if (mounted && result == 'rematch') {
           await _startMatchmaking();
-        } else {
-          _loadProfile();
+        } else if (mounted) {
+          _applyMatchResultAndReconcile(result);
         }
       });
 
