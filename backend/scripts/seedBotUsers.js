@@ -5,7 +5,8 @@ const supabase = require('../config/supabase');
 const { isUsernameAvailable } = require('../services/userService');
 
 const TARGET_COUNT = 500;
-const SPLIT = { gamertag: 325, nameStyle: 100, wordCombo: 75 };
+// 45% gamertag / 40% name-style / 15% word-combo.
+const SPLIT = { gamertag: 225, nameStyle: 200, wordCombo: 75 };
 const MAX_USERNAME_LEN = 20;
 const FK_VIOLATION = '23503';
 const UNIQUE_VIOLATION = '23505';
@@ -96,14 +97,12 @@ function genGamertag() {
 
 function genNameStyle() {
   const first = pick(FIRST_NAMES);
+  const initial = pick(INITIALS).toLowerCase();
   const roll = Math.random();
-  if (roll < 0.5) {
-    const sep = pick(['_', '.', '']);
-    return `${first}${sep}${pick(INITIALS)}`;
-  }
-  if (roll < 0.8) {
-    return `${first}${maybeDigits(1, 2, 2)}`;
-  }
+  // Favor the "Hiro.M" firstname.initial look — that's the requested style.
+  if (roll < 0.6) return `${first}.${initial}`;
+  if (roll < 0.8) return `${first}_${initial}`;
+  if (roll < 0.92) return `${first}${maybeDigits(1, 2, 2)}`;
   return first;
 }
 
@@ -230,7 +229,7 @@ async function run() {
   console.log(`${count || 0} bot users exist, seeding ${shortfall} more to reach ${TARGET_COUNT}.`);
 
   // Scale today's shortfall proportionally across the three categories so a
-  // partial re-run still ends up close to the intended 65/20/15 split.
+  // partial re-run still ends up close to the intended 45/40/15 split.
   const plan = [
     ...Array(Math.round(shortfall * (SPLIT.gamertag / TARGET_COUNT))).fill('gamertag'),
     ...Array(Math.round(shortfall * (SPLIT.nameStyle / TARGET_COUNT))).fill('nameStyle'),
@@ -267,9 +266,22 @@ async function run() {
   console.log(`Done. Inserted ${inserted} bot users. Sample:`, sample);
 }
 
-run()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error('seedBotUsers failed:', error.message);
-    process.exit(1);
-  });
+module.exports = {
+  TARGET_COUNT,
+  SPLIT,
+  MAX_USERNAME_LEN,
+  GENERATORS,
+  gaussianRating,
+  generateUniqueUsername,
+};
+
+// Only seed when invoked directly — requiring this file (e.g. from the
+// rebalance script to reuse the generators) must not kick off a seed.
+if (require.main === module) {
+  run()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      console.error('seedBotUsers failed:', error.message);
+      process.exit(1);
+    });
+}
