@@ -362,23 +362,10 @@ class _AppSettingsSheetState extends State<AppSettingsSheet> {
   @override
   Widget build(BuildContext context) {
     return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 40),
+      padding: const EdgeInsets.fromLTRB(24, 20, 24, 32),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Drag handle
-          Center(
-            child: Container(
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppColors.outline.withValues(alpha: 0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-
           // Title
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -536,25 +523,32 @@ Future<void> showAppSettingsSheet(
   required ValueChanged<bool> onTimerChanged,
   required ValueChanged<bool> onSoundEffectsChanged,
 }) {
-  return showModalBottomSheet<void>(
+  return showDialog<void>(
     context: context,
-    isScrollControlled: true,
-    backgroundColor: AppColors.surface,
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-    ),
-    builder: (ctx) => FractionallySizedBox(
-      heightFactor: 0.9,
-      child: AppSettingsSheet(
-        darkMode: darkMode,
-        highlightMistakes: highlightMistakes,
-        timerEnabled: timerEnabled,
-        soundEffects: soundEffects,
-        onDarkModeChanged: onDarkModeChanged,
-        onHighlightMistakesChanged: onHighlightMistakesChanged,
-        onTimerChanged: onTimerChanged,
-        onSoundEffectsChanged: onSoundEffectsChanged,
-        onClosePressed: () => Navigator.of(ctx).pop(),
+    barrierColor: Colors.black.withValues(alpha: 0.5),
+    builder: (ctx) => Dialog(
+      backgroundColor: AppColors.surface,
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 40),
+      clipBehavior: Clip.antiAlias,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(24),
+      ),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: 460,
+          maxHeight: MediaQuery.of(ctx).size.height * 0.85,
+        ),
+        child: AppSettingsSheet(
+          darkMode: darkMode,
+          highlightMistakes: highlightMistakes,
+          timerEnabled: timerEnabled,
+          soundEffects: soundEffects,
+          onDarkModeChanged: onDarkModeChanged,
+          onHighlightMistakesChanged: onHighlightMistakesChanged,
+          onTimerChanged: onTimerChanged,
+          onSoundEffectsChanged: onSoundEffectsChanged,
+          onClosePressed: () => Navigator.of(ctx).pop(),
+        ),
       ),
     ),
   );
