@@ -53,9 +53,16 @@ function getQueuedPlayer(userId) {
   return queue.find((entry) => entry.userId === userId) || null;
 }
 
+// Shallow copy so callers can iterate while the underlying queue mutates
+// (matches remove entries mid-iteration).
+function getQueueSnapshot() {
+  return [...queue];
+}
+
 module.exports = {
   addToQueue,
   findMatch,
   removeFromQueue,
   getQueuedPlayer,
+  getQueueSnapshot,
 };

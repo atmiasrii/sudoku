@@ -13,6 +13,7 @@ const {
   findMatch,
   removeFromQueue,
   getQueuedPlayer,
+  getQueueSnapshot,
 } = require('../services/matchmakingService');
 const { calculateElo } = require('../services/eloService');
 const {
@@ -34,7 +35,7 @@ const botFinishTimers = new Map();
 // fated to bust on mistakes. Keyed by gameId.
 const botPlans = new Map();
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 10000;
-const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 5000;
+const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 10000;
 
 // Lightweight per-socket sliding-window rate limiter. Prevents a single
 // connection from flooding join_queue / progress_update. State lives on the
@@ -366,6 +367,122 @@ function scheduleBotFallback(io, queuedPlayer) {
   queueFallbackTimers.set(queuedPlayer.userId, timer);
 }
 
+// Try to pair the given user with a compatible waiting opponent. Returns true
+// if a match was created. Safe to call from both the join handler and the
+// periodic sweep — the matchingUsers guard + immediate queue removal prevent
+// double-booking. Looks the player up live each call so a stale snapshot can't
+// pair someone who already left or matched.
+async function attemptMatch(io, userId) {
+  if (matchingUsers.has(userId)) return false;
+
+  const self = getQueuedPlayer(userId);
+  if (!self) return false;
+
+  const selfSocket = io.sockets.sockets.get(self.socketId);
+  if (!selfSocket) {
+    removeFromQueue(self.userId);
+    activeUsers.delete(self.userId);
+    return false;
+  }
+
+  const opponent = findMatch(self);
+  if (!opponent || opponent.userId === self.userId) return false;
+  if (matchingUsers.has(opponent.userId)) return false;
+
+  const opponentSocket = io.sockets.sockets.get(opponent.socketId);
+  if (!opponentSocket) {
+    removeFromQueue(opponent.userId);
+    activeUsers.delete(opponent.userId);
+    return false;
+  }
+
+  // Claim both and pull them off the queue synchronously, before any await, so
+  // a concurrent sweep/join can't double-book either side.
+  matchingUsers.add(self.userId);
+  matchingUsers.add(opponent.userId);
+  clearQueueFallbackTimer(self.userId);
+  clearQueueFallbackTimer(opponent.userId);
+  removeFromQueue(self.userId);
+  removeFromQueue(opponent.userId);
+
+  try {
+    const player1Id = opponent.userId;
+    const player2Id = self.userId;
+    const playersMeta = {
+      [player1Id]: {
+        userId: player1Id,
+        username: opponent.username || player1Id,
+        rating: opponent.rating,
+      },
+      [player2Id]: {
+        userId: player2Id,
+        username: self.username || player2Id,
+        rating: self.rating,
+      },
+    };
+
+    const { gameId, puzzle, solution } = createSession(player1Id, player2Id, { playersMeta });
+
+    opponentSocket.data.userId = player1Id;
+    opponentSocket.data.gameId = gameId;
+    selfSocket.data.userId = player2Id;
+    selfSocket.data.gameId = gameId;
+
+    setPlayerSocket(gameId, player1Id, opponentSocket.id);
+    setPlayerSocket(gameId, player2Id, selfSocket.id);
+
+    opponentSocket.join(gameId);
+    selfSocket.join(gameId);
+
+    io.to(gameId).emit('match_found', { gameId, puzzle, solution, playersMeta });
+
+    const matchedAt = Date.now();
+    const wait1 = Math.max(0, Math.floor((matchedAt - (opponent.joinedAt || matchedAt)) / 1000));
+    const wait2 = Math.max(0, Math.floor((matchedAt - (self.joinedAt || matchedAt)) / 1000));
+    Promise.all([
+      logQueue({
+        user_id: player1Id,
+        joined_at: new Date(opponent.joinedAt || matchedAt).toISOString(),
+        matched_at: new Date(matchedAt).toISOString(),
+        wait_time: wait1,
+      }),
+      logQueue({
+        user_id: player2Id,
+        joined_at: new Date(self.joinedAt || matchedAt).toISOString(),
+        matched_at: new Date(matchedAt).toISOString(),
+        wait_time: wait2,
+      }),
+    ]).catch((error) => {
+      console.error('Failed to write queue match log:', error.message);
+    });
+
+    return true;
+  } finally {
+    matchingUsers.delete(self.userId);
+    matchingUsers.delete(opponent.userId);
+  }
+}
+
+// Re-run matching across everyone still waiting. The join-time attempt only
+// sees the rating band as it is at that instant; this sweep retries as each
+// player's band widens with wait time, so two humans whose ratings differ
+// always pair within a sweep interval instead of stranding on the bot fallback.
+const MATCH_SWEEP_MS = 1500;
+let matchSweepTimer = null;
+
+function startMatchSweep(io) {
+  if (matchSweepTimer) return;
+  matchSweepTimer = setInterval(async () => {
+    const waiting = getQueueSnapshot();
+    for (const player of waiting) {
+      if (matchingUsers.has(player.userId)) continue;
+      // eslint-disable-next-line no-await-in-loop
+      await attemptMatch(io, player.userId);
+    }
+  }, MATCH_SWEEP_MS);
+  if (typeof matchSweepTimer.unref === 'function') matchSweepTimer.unref();
+}
+
 function isProgressValueInRange(value, min, max) {
   return Number.isInteger(value) && value >= min && value <= max;
 }
@@ -562,6 +679,9 @@ function initializeSocketServer(io) {
   // no-op otherwise (keeps local testing working without a secret).
   io.use(socketAuth);
 
+  // Background re-matcher: pairs waiting humans as their rating bands widen.
+  startMatchSweep(io);
+
   io.on('connection', (socket) => {
     socket.on('join_queue', async (payload = {}) => {
       // Max 5 queue attempts / 10s per socket.
@@ -621,95 +741,12 @@ function initializeSocketServer(io) {
         console.error('Failed to write queue join log:', error.message);
       }
 
-      const opponent = findMatch(queuedPlayer);
-      if (!opponent) {
+      // Instant pair if a compatible opponent is already waiting; otherwise the
+      // periodic sweep (started in initializeSocketServer) keeps retrying as the
+      // rating band widens, and the bot fallback fires if no human shows up.
+      const matched = await attemptMatch(io, queuedPlayer.userId);
+      if (!matched) {
         scheduleBotFallback(io, queuedPlayer);
-        return;
-      }
-
-      if (opponent.userId === queuedPlayer.userId) {
-        return;
-      }
-
-      if (matchingUsers.has(queuedPlayer.userId) || matchingUsers.has(opponent.userId)) {
-        return;
-      }
-
-      matchingUsers.add(queuedPlayer.userId);
-      matchingUsers.add(opponent.userId);
-
-      try {
-        const opponentSocket = io.sockets.sockets.get(opponent.socketId);
-        if (!opponentSocket) {
-          removeFromQueue(opponent.userId);
-          activeUsers.delete(opponent.userId);
-          return;
-        }
-
-        // Remove both players from queue immediately to avoid double-match races.
-        clearQueueFallbackTimer(queuedPlayer.userId);
-        clearQueueFallbackTimer(opponent.userId);
-        removeFromQueue(queuedPlayer.userId);
-        removeFromQueue(opponent.userId);
-
-        const player1Id = opponent.userId;
-        const player2Id = queuedPlayer.userId;
-        const playersMeta = {
-          [player1Id]: {
-            userId: player1Id,
-            username: opponent.username || player1Id,
-            rating: opponent.rating,
-          },
-          [player2Id]: {
-            userId: player2Id,
-            username: queuedPlayer.username || player2Id,
-            rating: queuedPlayer.rating,
-          },
-        };
-
-        const { gameId, puzzle, solution } = createSession(player1Id, player2Id, { playersMeta });
-
-        opponentSocket.data.userId = player1Id;
-        opponentSocket.data.gameId = gameId;
-        socket.data.gameId = gameId;
-
-        setPlayerSocket(gameId, player1Id, opponentSocket.id);
-        setPlayerSocket(gameId, player2Id, socket.id);
-
-        opponentSocket.join(gameId);
-        socket.join(gameId);
-
-        io.to(gameId).emit('match_found', {
-          gameId,
-          puzzle,
-          solution,
-          playersMeta,
-        });
-
-        const matchedAt = Date.now();
-        const player1Wait = Math.max(0, Math.floor((matchedAt - (opponent.joinedAt || matchedAt)) / 1000));
-        const player2Wait = Math.max(0, Math.floor((matchedAt - (queuedPlayer.joinedAt || matchedAt)) / 1000));
-
-        try {
-          await logQueue({
-            user_id: player1Id,
-            joined_at: new Date(opponent.joinedAt || matchedAt).toISOString(),
-            matched_at: new Date(matchedAt).toISOString(),
-            wait_time: player1Wait,
-          });
-
-          await logQueue({
-            user_id: player2Id,
-            joined_at: new Date(queuedPlayer.joinedAt || matchedAt).toISOString(),
-            matched_at: new Date(matchedAt).toISOString(),
-            wait_time: player2Wait,
-          });
-        } catch (error) {
-          console.error('Failed to write queue match log:', error.message);
-        }
-      } finally {
-        matchingUsers.delete(queuedPlayer.userId);
-        matchingUsers.delete(opponent.userId);
       }
     });
 
