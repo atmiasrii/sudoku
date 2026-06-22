@@ -10,6 +10,7 @@ import '../config/api_config.dart';
 import '../models/game_session.dart';
 import '../services/active_game_store.dart';
 import '../services/analytics_service.dart';
+import '../services/auth_service.dart';
 import '../services/game_api_service.dart';
 import '../services/multiplayer_socket_service.dart';
 import '../services/profile_cache_store.dart';
@@ -469,7 +470,11 @@ class _HomeScreenState extends State<HomeScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          UserAvatar(userId: widget.userId, size: 40),
+          UserAvatar(
+            userId: widget.userId,
+            name: AuthService.instance.displayName(),
+            size: 40,
+          ),
           SettingsGearButton(onPressed: widget.onSettingsPressed),
         ],
       ),

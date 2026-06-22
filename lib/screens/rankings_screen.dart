@@ -207,6 +207,7 @@ class _RankingsScreenState extends State<RankingsScreen> {
           const SizedBox(width: 10),
           UserAvatar(
             userId: player['id']?.toString() ?? 'unknown',
+            name: name,
             size: 38,
           ),
           const SizedBox(width: 12),

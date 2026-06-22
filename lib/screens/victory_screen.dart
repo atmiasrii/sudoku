@@ -61,6 +61,7 @@ class VictoryScreen extends StatelessWidget {
                   children: [
                     UserAvatar(
                       userId: playerUserId ?? 'player',
+                      name: playerName,
                       size: 42,
                     ),
                     const SizedBox(width: 12),

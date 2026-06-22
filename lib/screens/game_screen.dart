@@ -1469,6 +1469,7 @@ class _VersusHeader extends StatelessWidget {
         children: [
           UserAvatar(
             userId: playerUserId ?? 'player',
+            name: playerName,
             size: 32,
           ),
           const SizedBox(width: 8),
@@ -1537,6 +1538,7 @@ class _VersusHeader extends StatelessWidget {
           const SizedBox(width: 8),
           UserAvatar(
             userId: opponentUserId ?? 'opponent',
+            name: opponentName,
             size: 32,
           ),
         ],
