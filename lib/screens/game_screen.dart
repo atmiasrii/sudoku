@@ -72,9 +72,14 @@ class _GameScreenState extends State<GameScreen>
   int _playerRating = 1200;
   int _opponentRating = 1200;
   int _opponentProgressPercent = 0;
+  int _playerProgressHigh = 0;
   int _lastRatingDelta = 0;
   int _opponentMistakes = 0;
   String? _opponentId;
+
+  /// The 4th mistake ends a match (mirrors the server's MISTAKE_LIMIT). Stops
+  /// brute-forcing the board with random guesses.
+  static const int _mistakeLimit = 4;
 
   bool get _isMultiplayer => widget.multiplayerEnabled;
 
@@ -228,6 +233,7 @@ class _GameScreenState extends State<GameScreen>
     _opponentRating = s.opponentRating;
     _opponentId = s.opponentId;
     _opponentProgressPercent = 0;
+    _playerProgressHigh = 0;
     _opponentMistakes = 0;
   }
 
@@ -529,8 +535,9 @@ class _GameScreenState extends State<GameScreen>
         final mistakes = value['mistakes'];
         if (filled is num) {
           final total = _totalFillableCells == 0 ? 1 : _totalFillableCells;
-          _opponentProgressPercent =
-              ((filled.toInt() / total) * 100).round().clamp(0, 100);
+          final pct = ((filled.toInt() / total) * 100).round().clamp(0, 100);
+          // Monotonic: the opponent meter only ever rises.
+          if (pct > _opponentProgressPercent) _opponentProgressPercent = pct;
         }
         if (mistakes is num) {
           _opponentMistakes = mistakes.toInt();
@@ -568,6 +575,7 @@ class _GameScreenState extends State<GameScreen>
       _opponentRating = 1200;
       _opponentId = null;
       _opponentProgressPercent = 0;
+      _playerProgressHigh = 0;
       _opponentMistakes = 0;
       return;
     }
@@ -596,6 +604,7 @@ class _GameScreenState extends State<GameScreen>
     _opponentId = null;
     _applyPlayersMeta(session.playersMeta);
     _opponentProgressPercent = 0;
+    _playerProgressHigh = 0;
     _opponentMistakes = 0;
   }
 
@@ -1015,17 +1024,33 @@ class _GameScreenState extends State<GameScreen>
         _mistakes += 1;
       }
       _cellNotes.remove(_noteKey(row, col));
+      // Progress meter only ever rises (high-water mark).
+      final p = _playerProgressPercent;
+      if (p > _playerProgressHigh) _playerProgressHigh = p;
     });
 
     _reportProgress();
     _persistSnapshot();
 
-    if (!_isMultiplayer && !_gameEnded && _mistakes >= 3) {
+    // 4-mistake elimination. Single-player ends locally; multiplayer is
+    // server-authoritative (the reported mistake makes the server broadcast
+    // game_end) — lock input and wait for the defeat result.
+    if (!_isMultiplayer && !_gameEnded && _mistakes >= _mistakeLimit) {
       setState(() {
         _gameEnded = true;
         _lost = true;
       });
       await _openResultScreen(won: false, allowContinueOnClose: true);
+      return;
+    }
+
+    if (_isMultiplayer && !_gameEnded && !_awaitingFinish && _mistakes >= _mistakeLimit) {
+      setState(() => _awaitingFinish = true);
+      _finishTimeout?.cancel();
+      _finishTimeout = Timer(const Duration(seconds: 5), () {
+        if (!mounted || _gameEnded) return;
+        setState(() => _awaitingFinish = false);
+      });
       return;
     }
 
@@ -1294,7 +1319,7 @@ class _GameScreenState extends State<GameScreen>
               ),
               const SizedBox(height: 10),
               _ProgressPanel(
-                playerProgress: _playerProgressPercent,
+                playerProgress: _playerProgressHigh,
                 opponentProgress: _opponentProgressPercent,
                 mistakes: _mistakes,
                 opponentMistakes: _opponentMistakes,
@@ -1315,7 +1340,7 @@ class _GameScreenState extends State<GameScreen>
                       ),
                       SizedBox(width: 8),
                       Text(
-                        'Confirming your win…',
+                        'Finishing match…',
                         style: TextStyle(
                           color: AppColors.onSurfaceVariant,
                           fontSize: 13,

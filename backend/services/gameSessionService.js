@@ -91,7 +91,9 @@ function updateProgress(gameId, playerId, data) {
   }
 
   if (data.mistakes !== undefined) {
-    if (!Number.isInteger(data.mistakes) || data.mistakes < 0 || data.mistakes > 3) {
+    // 4 is the elimination threshold (see socketServer MISTAKE_LIMIT), so the
+    // value can legitimately reach 4.
+    if (!Number.isInteger(data.mistakes) || data.mistakes < 0 || data.mistakes > 4) {
       return { error: 'Invalid mistakes' };
     }
   }
@@ -118,7 +120,13 @@ function updateProgress(gameId, playerId, data) {
   }
 
   const progressUpdate = {};
-  if (data.filledCells !== undefined) progressUpdate.filledCells = data.filledCells;
+  if (data.filledCells !== undefined) {
+    // Progress is monotonic: it only ever rises. A lower value (undo, a
+    // replaced correct cell, or the bot's pacing jitter) must not pull the
+    // meter back down for either side.
+    const existingFilled = session.progress[playerId].filledCells || 0;
+    progressUpdate.filledCells = Math.max(existingFilled, data.filledCells);
+  }
   if (data.mistakes !== undefined) progressUpdate.mistakes = data.mistakes;
   if (data.completed !== undefined) progressUpdate.completed = data.completed;
 

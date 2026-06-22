@@ -36,6 +36,9 @@ const botFinishTimers = new Map();
 const botPlans = new Map();
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 10000;
 const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 10000;
+// Hitting this many mistakes ends the match — that player loses, the opponent
+// wins. Stops players (or bots) from brute-forcing the board with guesses.
+const MISTAKE_LIMIT = 4;
 
 // Lightweight per-socket sliding-window rate limiter. Prevents a single
 // connection from flooding join_queue / progress_update. State lives on the
@@ -111,15 +114,16 @@ function botSolveSeconds(rating) {
   return Math.max(BOT_SOLVE_FLOOR_S, Math.round(jittered));
 }
 
-// A weaker bot is more mistake-prone. Roll a target 0–3; if it hits 3 the bot
-// is fated to bust (forfeit) partway through, handing the human the win.
+// A weaker bot is more mistake-prone. Roll a target 0–4; reaching MISTAKE_LIMIT
+// (4) means the bot busts (forfeits) partway through, handing the human the win
+// — the same elimination rule humans face.
 function botMistakePlan(rating, solveMs) {
   const p = Math.max(0, Math.min(0.9, (1500 - (Number(rating) || 1200)) / 1400));
   let target = 0;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < MISTAKE_LIMIT; i++) {
     if (Math.random() < p) target++;
   }
-  const willBust = target >= 3;
+  const willBust = target >= MISTAKE_LIMIT;
   // Bust somewhere in the first ~40–70% of the window, never right at the start.
   const bustAtMs = willBust
     ? Math.round(solveMs * (0.4 + Math.random() * 0.3))
@@ -160,14 +164,11 @@ function emitBotProgress(io, gameId, botId) {
   }
 
   // Pace fill toward 100% along an ease-in-out curve so the meter moves
-  // naturally and lands at ~full right when the bot finishes.
+  // naturally and lands at ~full right when the bot finishes. Fill rises only —
+  // no jitter — so the opponent meter never ticks backward.
   const frac = Math.max(0, Math.min(1, elapsed / plan.solveMs));
   const eased = easeInOut(frac);
-  const jitter = (Math.random() - 0.5) * 0.03; // ±1.5%
-  const targetFilled = Math.max(
-    0,
-    Math.min(plan.emptyCells, Math.round(plan.emptyCells * (eased + jitter))),
-  );
+  const targetFilled = Math.min(plan.emptyCells, Math.round(plan.emptyCells * eased));
 
   // Reveal mistakes gradually over the course of the solve.
   const mistakesShown = Math.min(
@@ -780,7 +781,7 @@ function initializeSocketServer(io) {
       }
 
       if (payload.mistakes !== undefined) {
-        if (!isProgressValueInRange(payload.mistakes, 0, 3)) return;
+        if (!isProgressValueInRange(payload.mistakes, 0, MISTAKE_LIMIT)) return;
         data.mistakes = payload.mistakes;
       }
 
@@ -829,6 +830,20 @@ function initializeSocketServer(io) {
 
         await finalizeMatch(io, gameId, result, 'completed');
         return;
+      }
+
+      // Elimination: the 4th mistake ends the match — this player loses, the
+      // opponent wins. Server-authoritative so both clients resolve together.
+      const liveSession = getSession(gameId);
+      if (liveSession && (liveSession.progress?.[playerId]?.mistakes || 0) >= MISTAKE_LIMIT) {
+        const opponentId = liveSession.players.find((id) => id !== playerId);
+        if (opponentId) {
+          const finished = finishSession(gameId, opponentId);
+          if (finished) {
+            await finalizeMatch(io, gameId, finished, 'too_many_mistakes');
+            return;
+          }
+        }
       }
 
       io.to(gameId).emit('progress_update', {

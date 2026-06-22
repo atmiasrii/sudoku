@@ -183,7 +183,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        UserAvatar(userId: widget.userId, name: _username, size: 96),
+                        UserAvatar(userId: widget.userId, name: _username, size: 40),
                         SettingsGearButton(onPressed: widget.onSettingsPressed),
                       ],
                     ),
