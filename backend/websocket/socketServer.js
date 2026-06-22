@@ -30,6 +30,9 @@ const disconnectTimers = new Map();
 const queueFallbackTimers = new Map();
 const botProgressIntervals = new Map();
 const botFinishTimers = new Map();
+// Per-bot-match simulation plan: how fast this bot "solves" and whether it is
+// fated to bust on mistakes. Keyed by gameId.
+const botPlans = new Map();
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 10000;
 const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 5000;
 
@@ -69,11 +72,68 @@ function clearBotSimulation(gameId) {
     clearTimeout(finishTimer);
     botFinishTimers.delete(gameId);
   }
+
+  botPlans.delete(gameId);
+}
+
+// How long a player of this rating would take to solve the board, in seconds.
+// Piecewise-linear over realistic anchor points, then ±12% jitter, floored so
+// even a top bot never finishes instantly. Bots are seeded 800–2000 (see
+// seedBotUsers.gaussianRating); anchors extend a little past that for headroom.
+const BOT_SOLVE_ANCHORS = [
+  [800, 660], [1000, 510], [1200, 390], [1400, 300],
+  [1600, 240], [1800, 190], [2000, 145], [2200, 120],
+];
+const BOT_SOLVE_FLOOR_S = 110;
+
+function botSolveSeconds(rating) {
+  const r = Number(rating) || 1200;
+  const anchors = BOT_SOLVE_ANCHORS;
+  let base;
+  if (r <= anchors[0][0]) {
+    base = anchors[0][1];
+  } else if (r >= anchors[anchors.length - 1][0]) {
+    base = anchors[anchors.length - 1][1];
+  } else {
+    base = anchors[anchors.length - 1][1];
+    for (let i = 0; i < anchors.length - 1; i++) {
+      const [r0, s0] = anchors[i];
+      const [r1, s1] = anchors[i + 1];
+      if (r >= r0 && r <= r1) {
+        const t = (r - r0) / (r1 - r0);
+        base = s0 + (s1 - s0) * t;
+        break;
+      }
+    }
+  }
+  const jittered = base * (0.88 + Math.random() * 0.24);
+  return Math.max(BOT_SOLVE_FLOOR_S, Math.round(jittered));
+}
+
+// A weaker bot is more mistake-prone. Roll a target 0–3; if it hits 3 the bot
+// is fated to bust (forfeit) partway through, handing the human the win.
+function botMistakePlan(rating, solveMs) {
+  const p = Math.max(0, Math.min(0.9, (1500 - (Number(rating) || 1200)) / 1400));
+  let target = 0;
+  for (let i = 0; i < 3; i++) {
+    if (Math.random() < p) target++;
+  }
+  const willBust = target >= 3;
+  // Bust somewhere in the first ~40–70% of the window, never right at the start.
+  const bustAtMs = willBust
+    ? Math.round(solveMs * (0.4 + Math.random() * 0.3))
+    : null;
+  return { mistakeTarget: target, bustAtMs };
+}
+
+function easeInOut(t) {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
 function emitBotProgress(io, gameId, botId) {
   const session = getSession(gameId);
-  if (!session || !session.progress?.[botId]) {
+  const plan = botPlans.get(gameId);
+  if (!session || !session.progress?.[botId] || !plan) {
     clearBotSimulation(gameId);
     return;
   }
@@ -84,21 +144,39 @@ function emitBotProgress(io, gameId, botId) {
     return;
   }
 
-  const current = session.progress[botId] || { filledCells: 0, mistakes: 0 };
-  // Cap the bot at the puzzle's real blank count so the opponent meter scales
-  // 0 -> 100% against the same denominator the human uses (a hardcoded 80
-  // overshot the blanks and pinned the opponent near 100% from the start).
-  const emptyCells = Array.isArray(session.puzzle)
-    ? session.puzzle.reduce(
-        (sum, row) => sum + row.filter((value) => value === 0).length,
-        0,
-      )
-    : 80;
-  const nextFilled = Math.min(emptyCells, current.filledCells + Math.floor(Math.random() * 4));
-  const nextMistakes = Math.min(2, current.mistakes + (Math.random() < 0.2 ? 1 : 0));
+  const elapsed = Date.now() - plan.startedAt;
+
+  // Mistake-bust path: the bot melts down mid-match and forfeits.
+  if (plan.bustAtMs != null && elapsed >= plan.bustAtMs) {
+    const bustResult = finishSession(gameId, humanId);
+    clearBotSimulation(gameId);
+    if (bustResult) {
+      finalizeMatch(io, gameId, bustResult, 'bot_mistakes').catch((error) => {
+        console.error('Failed to finalize bot-bust match:', error.message);
+      });
+    }
+    return;
+  }
+
+  // Pace fill toward 100% along an ease-in-out curve so the meter moves
+  // naturally and lands at ~full right when the bot finishes.
+  const frac = Math.max(0, Math.min(1, elapsed / plan.solveMs));
+  const eased = easeInOut(frac);
+  const jitter = (Math.random() - 0.5) * 0.03; // ±1.5%
+  const targetFilled = Math.max(
+    0,
+    Math.min(plan.emptyCells, Math.round(plan.emptyCells * (eased + jitter))),
+  );
+
+  // Reveal mistakes gradually over the course of the solve.
+  const mistakesShown = Math.min(
+    plan.mistakeTarget,
+    Math.floor(plan.mistakeTarget * frac + 0.0001),
+  );
+
   const result = updateProgress(gameId, botId, {
-    filledCells: nextFilled,
-    mistakes: nextMistakes,
+    filledCells: targetFilled,
+    mistakes: mistakesShown,
     completed: false,
   });
 
@@ -115,8 +193,27 @@ function emitBotProgress(io, gameId, botId) {
   });
 }
 
-function startBotSimulation(io, gameId, botId) {
+function startBotSimulation(io, gameId, botId, rating) {
   clearBotSimulation(gameId);
+
+  const session = getSession(gameId);
+  const emptyCells = session && Array.isArray(session.puzzle)
+    ? session.puzzle.reduce(
+        (sum, row) => sum + row.filter((value) => value === 0).length,
+        0,
+      )
+    : 80;
+
+  const solveMs = botSolveSeconds(rating) * 1000;
+  const { mistakeTarget, bustAtMs } = botMistakePlan(rating, solveMs);
+
+  botPlans.set(gameId, {
+    startedAt: Date.now(),
+    solveMs,
+    emptyCells,
+    mistakeTarget,
+    bustAtMs,
+  });
 
   const progressInterval = setInterval(() => {
     emitBotProgress(io, gameId, botId);
@@ -124,10 +221,11 @@ function startBotSimulation(io, gameId, botId) {
 
   botProgressIntervals.set(gameId, progressInterval);
 
-  const finishDelayMs = 60000 + Math.floor(Math.random() * 45000);
+  // Normal completion at the planned solve time (the bust path, if any, fires
+  // earlier from emitBotProgress).
   const finishTimer = setTimeout(() => {
-    const session = getSession(gameId);
-    if (!session || !session.progress?.[botId]) {
+    const liveSession = getSession(gameId);
+    if (!liveSession || !liveSession.progress?.[botId]) {
       clearBotSimulation(gameId);
       return;
     }
@@ -141,7 +239,7 @@ function startBotSimulation(io, gameId, botId) {
     finalizeMatch(io, gameId, finishedResult, 'bot_completed').catch((error) => {
       console.error('Failed to finalize bot-ended match:', error.message);
     });
-  }, finishDelayMs);
+  }, solveMs);
 
   botFinishTimers.set(gameId, finishTimer);
 }
@@ -259,7 +357,7 @@ function scheduleBotFallback(io, queuedPlayer) {
         console.error('Failed to write bot queue match log:', error.message);
       });
 
-      startBotSimulation(io, gameId, botId);
+      startBotSimulation(io, gameId, botId, bot.rating);
     } finally {
       matchingUsers.delete(liveQueuedPlayer.userId);
     }
