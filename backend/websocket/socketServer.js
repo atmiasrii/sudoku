@@ -695,11 +695,19 @@ function initializeSocketServer(io) {
         return;
       }
 
+      // Re-queuing always starts a fresh match — never force a resume. If a
+      // stale session lingers (app killed mid-game, etc.), abandon it: forfeit
+      // it to the opponent so they aren't stranded, then fall through and queue.
       const activeGameId = getUserSession(userId);
       if (activeGameId && getSession(activeGameId)) {
-        const activeSession = getSession(activeGameId);
-        socket.emit('reconnect_required', toPublicSession(activeGameId, activeSession, userId));
-        return;
+        const stale = getSession(activeGameId);
+        const opponentId = stale.players.find((id) => id !== userId) || userId;
+        const finished = finishSession(activeGameId, opponentId);
+        if (finished) {
+          finalizeMatch(io, activeGameId, finished, 'opponent_left').catch((error) => {
+            console.error('Failed to finalize abandoned match:', error.message);
+          });
+        }
       }
 
       let rating = 1200;

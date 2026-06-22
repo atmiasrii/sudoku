@@ -230,26 +230,9 @@ class _HomeScreenState extends State<HomeScreen> {
     // not open a second queue/dialog.
     if (_matchmaking) return;
 
-    // Can't start a new match while one is already in progress. A live match
-    // keeps the user inside GameScreen, but an app-kill mid-game leaves a
-    // resumable snapshot — resume that instead of queueing again.
-    final active = await ActiveGameStore.load(widget.userId);
-    if (active != null) {
-      if (!mounted) return;
-      final result = await Navigator.of(context).push(
-        fadeThroughRoute(
-          GameScreen(
-            restoreFrom: active,
-            highlightMistakes: widget.highlightMistakes,
-            timerEnabled: widget.timerEnabled,
-            currentUserId: widget.userId,
-            multiplayerEnabled: active.multiplayer,
-          ),
-        ),
-      );
-      if (mounted) _applyMatchResultAndReconcile(result);
-      return;
-    }
+    // Always start fresh: discard any leftover mid-game snapshot rather than
+    // prompting to resume an old match.
+    await ActiveGameStore.clear();
 
     _matchmaking = true;
     try {
@@ -288,60 +271,12 @@ class _HomeScreenState extends State<HomeScreen> {
         }
       });
 
+      // Resume/reconnect is intentionally disabled from the lobby: re-queuing
+      // always starts a fresh match (the server abandons any stale session), so
+      // the old "Resume Match?" prompt never appears. Kept as a no-op guard in
+      // case a stray event arrives.
       _reconnectRequiredSub =
-          _socketService.reconnectRequiredStream.listen((payload) async {
-        if (!mounted) return;
-        _queueDialogOpen = false;
-        _queueTimer?.cancel();
-        if (Navigator.of(context, rootNavigator: true).canPop()) {
-          Navigator.of(context, rootNavigator: true).pop();
-        }
-
-        final shouldResume = await showDialog<bool>(
-          context: context,
-          builder: (ctx) => AlertDialog(
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            backgroundColor: AppColors.surfaceContainerLowest,
-            title: const Text('Resume Match',
-                style: TextStyle(fontWeight: FontWeight.bold)),
-            content: const Text('You have an active match. Resume it?'),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.of(ctx).pop(false),
-                  child: const Text('No')),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primary,
-                    foregroundColor: Colors.white),
-                onPressed: () => Navigator.of(ctx).pop(true),
-                child: const Text('Resume'),
-              ),
-            ],
-          ),
-        );
-
-        if (shouldResume != true) {
-          _socketService.disconnect();
-          return;
-        }
-
-        final session = GameSession.fromMatchFound(payload);
-        if (!mounted) return;
-        final result = await Navigator.of(context).push(
-          fadeThroughRoute(
-            GameScreen(
-              initialSession: session,
-              highlightMistakes: widget.highlightMistakes,
-              timerEnabled: widget.timerEnabled,
-              currentUserId: userId,
-              multiplayerEnabled: true,
-            ),
-          ),
-        );
-
-        if (mounted && result == 'rematch') await _startMatchmaking();
-      });
+          _socketService.reconnectRequiredStream.listen((_) {});
 
       _queueSeconds = 0;
       _queueSecondsNotifier.value = 0;
