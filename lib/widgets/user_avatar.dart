@@ -1,12 +1,11 @@
 import 'package:flutter/material.dart';
 
-/// A polished, deterministic avatar for a user.
+/// A polished avatar for a user.
 ///
-/// Renders a smooth two-tone gradient (Vercel/Linear style) seeded from
-/// [userId], with a monogram on top — the first letter of [name] when given,
-/// otherwise the first alphanumeric of the id. The same id always produces the
-/// same gradient on every device: the seed comes from an explicit FNV-1a hash
-/// rather than `String.hashCode`, which is not stable across platforms.
+/// Uniform near-black disc (matches the app's monochrome theme) with a white
+/// monogram on top — the first letter of [name] when given, otherwise the first
+/// alphanumeric of the id. A glossy highlight, inner ring, and soft shadow give
+/// it depth without color.
 class UserAvatar extends StatelessWidget {
   final String userId;
   final String? name;
@@ -21,26 +20,22 @@ class UserAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final seed = _fnv1a(userId);
-    final gradient = _gradients[seed % _gradients.length];
     final letter = _monogram(name, userId);
-    // Rotate the gradient a little per-seed so two adjacent palettes still read
-    // as distinct avatars.
-    final angle = ((seed >> 8) % 4) * 0.7;
 
     return Container(
       width: size,
       height: size,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        gradient: LinearGradient(
-          colors: gradient,
-          begin: Alignment(-1, -1 + angle),
-          end: Alignment(1, 1 - angle),
+        // Uniform near-black for everyone to match the app's monochrome theme.
+        gradient: const LinearGradient(
+          colors: [Color(0xFF2A2A2A), Color(0xFF111111)],
+          begin: Alignment(-1, -1),
+          end: Alignment(1, 1),
         ),
         boxShadow: [
           BoxShadow(
-            color: gradient.last.withValues(alpha: 0.35),
+            color: Colors.black.withValues(alpha: 0.30),
             blurRadius: size * 0.18,
             offset: Offset(0, size * 0.06),
           ),
@@ -111,32 +106,3 @@ String? _monogram(String? name, String userId) {
   }
   return null;
 }
-
-/// FNV-1a 32-bit hash. Deterministic and identical on every platform, so a
-/// user's avatar is the same everywhere.
-int _fnv1a(String input) {
-  const int prime = 0x01000193;
-  int hash = 0x811c9dc5;
-  for (final codeUnit in input.codeUnits) {
-    hash ^= codeUnit;
-    hash = (hash * prime) & 0xFFFFFFFF;
-  }
-  return hash;
-}
-
-/// Curated gradient pairs — vibrant but tasteful, each with enough contrast for
-/// white text.
-const List<List<Color>> _gradients = [
-  [Color(0xFF6366F1), Color(0xFF8B5CF6)], // indigo → violet
-  [Color(0xFF3B82F6), Color(0xFF06B6D4)], // blue → cyan
-  [Color(0xFF14B8A6), Color(0xFF10B981)], // teal → emerald
-  [Color(0xFF10B981), Color(0xFF84CC16)], // emerald → lime
-  [Color(0xFFF59E0B), Color(0xFFF97316)], // amber → orange
-  [Color(0xFFF97316), Color(0xFFEF4444)], // orange → red
-  [Color(0xFFEF4444), Color(0xFFEC4899)], // red → pink
-  [Color(0xFFEC4899), Color(0xFFA855F7)], // pink → purple
-  [Color(0xFF8B5CF6), Color(0xFF6366F1)], // violet → indigo
-  [Color(0xFF0EA5E9), Color(0xFF6366F1)], // sky → indigo
-  [Color(0xFFF43F5E), Color(0xFFF59E0B)], // rose → amber
-  [Color(0xFF06B6D4), Color(0xFF3B82F6)], // cyan → blue
-];
