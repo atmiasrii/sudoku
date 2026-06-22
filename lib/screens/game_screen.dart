@@ -159,14 +159,14 @@ class _GameScreenState extends State<GameScreen>
     _startTimerIfNeeded();
     if (_isMultiplayer) {
       _bindMultiplayerEvents();
-      if (widget.currentUserId != null && _gameId != null) {
-        if (widget.restoreFrom != null) {
-          // Cold restore: the socket was torn down when the app closed, so
-          // reconnect it before asking the server to rejoin the match.
-          _reconnectAfterRestore();
-        } else {
-          _socketService.reconnectGame(widget.currentUserId!, _gameId!);
-        }
+      // Only a cold restore needs to rejoin the match — a freshly matched game
+      // is already in its room from match_found. Calling reconnect_game on a new
+      // match made the server re-broadcast opponent_reconnected/game_state, so
+      // every new match falsely showed "Opponent reconnected. Match resumed."
+      if (widget.restoreFrom != null &&
+          widget.currentUserId != null &&
+          _gameId != null) {
+        _reconnectAfterRestore();
       }
     }
   }
