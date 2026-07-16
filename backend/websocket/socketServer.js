@@ -35,7 +35,7 @@ const botFinishTimers = new Map();
 // fated to bust on mistakes. Keyed by gameId.
 const botPlans = new Map();
 const DISCONNECT_GRACE_MS = Number(process.env.DISCONNECT_GRACE_MS) || 10000;
-const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 10000;
+const BOT_MATCH_WAIT_MS = Number(process.env.BOT_MATCH_WAIT_MS) || 5000;
 // Hitting this many mistakes ends the match — that player loses, the opponent
 // wins. Stops players (or bots) from brute-forcing the board with guesses.
 const MISTAKE_LIMIT = 4;
