@@ -2,6 +2,9 @@
 backend/node_modules/
 tool/iconfwd/node_modules/
 
+# Local dev tooling, not shipped
+tool/
+
 # Miscellaneous
 *.class
 *.log
@@ -47,3 +50,8 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+release.jks
+android/key.properties
+.env.local
+.claude/settings.local.json
